@@ -3,31 +3,26 @@ import time
 import threading
 import requests
 import yfinance as yf
-from flask import Flask, request, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify
 from datetime import datetime
 
-app = Flask(__name__)
-
 # ================== CONFIG ==================
-TOKEN = os.environ.get("TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")
-
-ACCOUNT_SIZE = 150000
-RISK_PERCENT = 2
+ACCOUNT_SIZE = 150000      # TL
+RISK_PERCENT = 2           # %
+CHECK_INTERVAL = 15        # saniye
 
 WATCHLIST = {
-    "ASELS.IS": {"lower": 290.0, "upper": 310.0, "alerted": None},
-    "TUPRS.IS": {"lower": 140.0, "upper": 170.0, "alerted": None},
-    "FROTO.IS": {"lower": 850.0, "upper": 900.0, "alerted": None},
+    "ASELS.IS": {"lower": 290, "upper": 310, "alerted": None},
+    "TUPRS.IS": {"lower": 140, "upper": 170, "alerted": None},
+    "FROTO.IS": {"lower": 850, "upper": 900, "alerted": None},
 }
 
+# ================== APP ==================
+app = Flask(__name__)
 TICKERS = {s: yf.Ticker(s) for s in WATCHLIST}
 
-# ================== UTILS ==================
-def parse_price(v):
-    return float(v.replace(",", ".").strip())
 
-
+# ================== MARKET ==================
 def market_open():
     now = datetime.now()
     if now.weekday() >= 5:
@@ -35,227 +30,145 @@ def market_open():
     return 9 <= now.hour < 18
 
 
-def send_telegram(msg):
-    if not TOKEN or not CHAT_ID:
-        return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": msg},
-            timeout=5,
-        )
-    except Exception:
-        pass
-
-
-# ================== PRICE & MOMENTUM ==================
-def get_price_and_momentum(symbol):
-    """
-    Son 6 mum alınır:
-    - Son fiyat
-    - Son 5 mum momentum (yükseliyor / düşüyor / yatay)
-    """
-    try:
-        hist = TICKERS[symbol].history(period="1d", interval="1m")
-        if hist.empty or len(hist) < 6:
-            return None, "FLAT"
-
-        closes = hist["Close"].iloc[-6:].tolist()
-        price = round(float(closes[-1]), 2)
-
-        ups = sum(1 for i in range(1, 6) if closes[i] > closes[i - 1])
-        downs = sum(1 for i in range(1, 6) if closes[i] < closes[i - 1])
-
-        if ups >= 4:
-            momentum = "UP"
-        elif downs >= 4:
-            momentum = "DOWN"
-        else:
-            momentum = "FLAT"
-
-        return price, momentum
-
-    except Exception:
-        return None, "FLAT"
-
-
-# ================== SMART SIGNAL ENGINE ==================
-def generate_signal(price, lower, upper, momentum):
-    if price is None:
-        return "VERİ YOK"
-
-    # AL: fiyat düşük + momentum yukarı
-    if price <= lower * 1.005 and momentum == "UP":
-        return "AL"
-
-    # SAT: fiyat yüksek + momentum aşağı
-    if price >= upper * 0.995 and momentum == "DOWN":
-        return "SAT"
-
-    return "BEKLE"
-
-
-# ================== BACKGROUND TELEGRAM ==================
-def price_monitor():
-    while True:
+# ================== PRICE ==================
+def get_prices():
+    prices = {}
+    for s in WATCHLIST:
         try:
-            if not market_open():
-                time.sleep(60)
-                continue
+            h = TICKERS[s].history(period="1d", interval="1m")
+            prices[s] = round(float(h["Close"].iloc[-1]), 2) if not h.empty else None
+        except:
+            prices[s] = None
+    return prices
 
-            for s, cfg in WATCHLIST.items():
-                price, momentum = get_price_and_momentum(s)
-                if price is None:
-                    continue
 
-                signal = generate_signal(
-                    price, cfg["lower"], cfg["upper"], momentum
-                )
+# ================== MOMENTUM ==================
+def momentum(symbol):
+    try:
+        h = TICKERS[symbol].history(period="1d", interval="1m").tail(6)
+        closes = h["Close"].tolist()
+        up = sum(1 for i in range(1, 6) if closes[i] > closes[i - 1])
+        down = sum(1 for i in range(1, 6) if closes[i] < closes[i - 1])
+        if up >= 4:
+            return "UP"
+        if down >= 4:
+            return "DOWN"
+        return "FLAT"
+    except:
+        return "FLAT"
 
-                if signal == "AL" and cfg["alerted"] != "AL":
-                    send_telegram(
-                        f"🟢 AL SİNYALİ\n{s}\nFiyat: {price}\nMomentum: ↑"
-                    )
-                    cfg["alerted"] = "AL"
 
-                elif signal == "SAT" and cfg["alerted"] != "SAT":
-                    send_telegram(
-                        f"🔴 SAT SİNYALİ\n{s}\nFiyat: {price}\nMomentum: ↓"
-                    )
-                    cfg["alerted"] = "SAT"
+# ================== LOT & RISK ==================
+def calculate_lot(entry, stop):
+    risk_tl = ACCOUNT_SIZE * (RISK_PERCENT / 100)
+    per_share_risk = abs(entry - stop)
+    if per_share_risk == 0:
+        return 0, 0
+    lot = int(risk_tl / per_share_risk)
+    total_risk = lot * per_share_risk
+    return lot, round(total_risk, 2)
 
-                elif signal == "BEKLE":
-                    cfg["alerted"] = None
 
-            time.sleep(30)
+# ================== SIGNAL ==================
+def generate_signal(symbol, price):
+    l = WATCHLIST[symbol]["lower"]
+    u = WATCHLIST[symbol]["upper"]
+    m = momentum(symbol)
 
-        except Exception:
-            time.sleep(10)
+    if price <= l and m == "UP":
+        lot, risk = calculate_lot(price, l)
+        return "AL", lot, risk
+
+    if price >= u and m == "DOWN":
+        lot, risk = calculate_lot(price, u)
+        return "SAT", lot, risk
+
+    return "BEKLE", 0, 0
 
 
 # ================== API ==================
 @app.route("/api/data")
 def api_data():
+    prices = get_prices()
     data = {}
 
-    for s, cfg in WATCHLIST.items():
-        price, momentum = get_price_and_momentum(s)
-        signal = generate_signal(
-            price, cfg["lower"], cfg["upper"], momentum
-        )
-
+    for s, p in prices.items():
+        signal, lot, risk = generate_signal(s, p) if p else ("VERİ YOK", 0, 0)
         data[s] = {
-            "price": price,
-            "lower": cfg["lower"],
-            "upper": cfg["upper"],
+            "price": p,
+            "lower": WATCHLIST[s]["lower"],
+            "upper": WATCHLIST[s]["upper"],
             "signal": signal,
-            "momentum": momentum,
+            "lot": lot,
+            "risk": risk,
         }
 
     return jsonify(data)
 
 
-# ================== WEB PANEL ==================
-@app.route("/", methods=["GET", "POST"])
+# ================== WEB ==================
+@app.route("/")
 def home():
-    error = None
-
-    if request.method == "POST":
-        try:
-            s = request.form["symbol"]
-            WATCHLIST[s]["lower"] = parse_price(request.form["lower"])
-            WATCHLIST[s]["upper"] = parse_price(request.form["upper"])
-            WATCHLIST[s]["alerted"] = None
-        except Exception as e:
-            error = str(e)
-
     html = """
     <html>
     <head>
-        <title>BIST Akıllı Panel</title>
+        <title>BIST Professional Trading Panel</title>
         <style>
-            body { background:#0b0b0b; color:white; font-family:Arial; padding:40px; }
+            body { background:#0e0e0e; color:white; font-family:Arial; padding:40px; }
             table { width:100%; border-collapse:collapse; }
             th, td { padding:12px; border-bottom:1px solid #333; text-align:center; }
             th { background:#1e1e1e; }
-            .badge { padding:6px 14px; border-radius:14px; font-weight:bold; }
-            .AL { background:#0f5132; color:#9cffd0; }
-            .SAT { background:#842029; color:#ffb3b3; }
+            .AL { background:#0f5132; }
+            .SAT { background:#842029; }
             .BEKLE { background:#41464b; }
-            .UP { color:#6cff6c; }
-            .DOWN { color:#ff6c6c; }
-            .FLAT { color:#ccc; }
-            input, select, button { padding:8px; margin:4px; }
-            button { background:#0a84ff; color:white; border:none; }
         </style>
     </head>
     <body>
+        <h2>📊 BIST Profesyonel Trading Sistemi</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Hisse</th>
+                    <th>Fiyat</th>
+                    <th>Alt</th>
+                    <th>Üst</th>
+                    <th>Sinyal</th>
+                    <th>Lot</th>
+                    <th>Risk (TL)</th>
+                </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+        </table>
 
-    <h2>📊 BIST Akıllı Manuel Alarm Sistemi</h2>
-
-    {% if error %}<div style="color:red">{{error}}</div>{% endif %}
-
-    <table>
-        <tr>
-            <th>Hisse</th>
-            <th>Fiyat</th>
-            <th>Alt</th>
-            <th>Üst</th>
-            <th>Momentum</th>
-            <th>Sinyal</th>
-        </tr>
-        {% for s in watchlist %}
-        <tr>
-            <td>{{s}}</td>
-            <td id="price-{{s}}">-</td>
-            <td>{{watchlist[s]["lower"]}}</td>
-            <td>{{watchlist[s]["upper"]}}</td>
-            <td id="mom-{{s}}">-</td>
-            <td id="sig-{{s}}">-</td>
-        </tr>
-        {% endfor %}
-    </table>
-
-    <h3>Limit Güncelle</h3>
-    <form method="post">
-        <select name="symbol">
-            {% for s in watchlist %}
-            <option>{{s}}</option>
-            {% endfor %}
-        </select>
-        <input name="lower" placeholder="Alt (294,25)">
-        <input name="upper" placeholder="Üst (310)">
-        <button>Güncelle</button>
-    </form>
-
-    <script>
-    async function refresh() {
-        const r = await fetch("/api/data");
-        const d = await r.json();
-
-        for (const s in d) {
-            document.getElementById("price-"+s).innerText = d[s].price ?? "YOK";
-            document.getElementById("mom-"+s).innerHTML =
-                "<span class='"+d[s].momentum+"'>"+d[s].momentum+"</span>";
-
-            document.getElementById("sig-"+s).innerHTML =
-                "<span class='badge "+d[s].signal+"'>"+d[s].signal+"</span>";
+        <script>
+        async function refresh() {
+            const r = await fetch("/api/data");
+            const d = await r.json();
+            let html = "";
+            for (const s in d) {
+                const row = d[s];
+                html += `
+                <tr class="${row.signal}">
+                    <td>${s}</td>
+                    <td>${row.price ?? "-"}</td>
+                    <td>${row.lower}</td>
+                    <td>${row.upper}</td>
+                    <td>${row.signal}</td>
+                    <td>${row.lot}</td>
+                    <td>${row.risk}</td>
+                </tr>`;
+            }
+            document.getElementById("rows").innerHTML = html;
         }
-    }
-
-    setInterval(refresh, 15000);
-    refresh();
-    </script>
-
+        setInterval(refresh, 15000);
+        refresh();
+        </script>
     </body>
     </html>
     """
-
-    return render_template_string(html, watchlist=WATCHLIST, error=error)
+    return render_template_string(html)
 
 
 # ================== START ==================
-threading.Thread(target=price_monitor, daemon=True).start()
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
