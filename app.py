@@ -5,21 +5,16 @@ import requests
 import yfinance as yf
 from flask import Flask, request, render_template_string, jsonify
 from datetime import datetime
-import pandas as pd
 
-# ================= CONFIG =================
-ACCOUNT_SIZE = 150000
-RISK_PERCENT = 2
-ATR_PERIOD = 14
-STOP_MULT = 1.5
-TP_MULT = 2.5
-REFRESH_SEC = 10
+app = Flask(__name__)
 
+# ================== CONFIG ==================
 TOKEN = os.environ.get("TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 
-# ================= APP =================
-app = Flask(__name__)
+ACCOUNT_SIZE = 150000
+RISK_PERCENT = 2
+REFRESH_SECONDS = 10
 
 WATCHLIST = {
     "ASELS.IS": {"lower": 290, "upper": 310, "alerted": None},
@@ -29,195 +24,251 @@ WATCHLIST = {
 
 TICKERS = {s: yf.Ticker(s) for s in WATCHLIST}
 
-# ================= UTILS =================
+
+# ================== HELPERS ==================
 def market_open():
     now = datetime.now()
-    return now.weekday() < 5 and 9 <= now.hour < 18
+    if now.weekday() >= 5:
+        return False
+    return 9 <= now.hour < 18
 
-def send(msg):
-    if TOKEN and CHAT_ID:
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": msg},
-                timeout=5,
-            )
-        except:
-            pass
 
-# ================= DATA =================
-def get_price_and_atr(symbol):
+def send_telegram(msg):
+    if not TOKEN or not CHAT_ID:
+        return
     try:
-        df = TICKERS[symbol].history(period="5d", interval="15m")
-        if len(df) < ATR_PERIOD:
-            return None, None
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": msg},
+            timeout=5
+        )
+    except Exception:
+        pass
 
-        df["H-L"] = df["High"] - df["Low"]
-        df["H-C"] = abs(df["High"] - df["Close"].shift())
-        df["L-C"] = abs(df["Low"] - df["Close"].shift())
-        tr = df[["H-L", "H-C", "L-C"]].max(axis=1)
-        atr = tr.rolling(ATR_PERIOD).mean().iloc[-1]
 
-        price = round(df["Close"].iloc[-1], 2)
-        return price, round(atr, 2)
-    except:
-        return None, None
+def get_prices():
+    prices = {}
+    for s in WATCHLIST:
+        try:
+            hist = TICKERS[s].history(period="1d", interval="1m")
+            prices[s] = round(float(hist["Close"].iloc[-1]), 2) if not hist.empty else None
+        except Exception:
+            prices[s] = None
+    return prices
 
-# ================= SIGNAL ENGINE =================
-def detect_mode(price, lower, upper, atr):
-    if price > upper + atr:
-        return "BREAKOUT UP"
-    if price < lower - atr:
-        return "BREAKOUT DOWN"
-    return "RANGE"
 
 def generate_signal(price, lower, upper):
+    if price is None:
+        return "VERİ YOK", 0
+
+    distance = abs(upper - lower)
+    if distance == 0:
+        return "BEKLE", 0
+
     if price <= lower:
-        return "AL"
+        confidence = min(90, int((lower - price) / distance * 100) + 50)
+        return "AL", confidence
+
     if price >= upper:
-        return "SAT"
-    return "BEKLE"
+        confidence = min(90, int((price - upper) / distance * 100) + 50)
+        return "SAT", confidence
 
-def confidence(signal, mode):
-    base = 60
-    if signal != "BEKLE":
-        base += 10
-    if "BREAKOUT" in mode:
-        base += 10
-    return min(base, 95)
+    return "BEKLE", 50
 
-def calc_risk(price, stop):
+
+def calculate_lot(price, stop_distance):
     risk_amount = ACCOUNT_SIZE * (RISK_PERCENT / 100)
-    per_unit = abs(price - stop)
-    if per_unit == 0:
+    if stop_distance <= 0:
         return 0, 0
-    lot = int(risk_amount / per_unit)
-    return lot, round(lot * per_unit, 2)
+    lot = int(risk_amount / stop_distance)
+    return lot, round(lot * stop_distance, 2)
 
-# ================= API =================
+
+# ================== API ==================
 @app.route("/api/data")
 def api_data():
-    rows = {}
+    prices = get_prices()
+    rows = []
 
     for s, cfg in WATCHLIST.items():
-        price, atr = get_price_and_atr(s)
-        if price is None:
-            continue
+        price = prices[s]
+        signal, conf = generate_signal(price, cfg["lower"], cfg["upper"])
 
-        signal = generate_signal(price, cfg["lower"], cfg["upper"])
-        mode = detect_mode(price, cfg["lower"], cfg["upper"], atr)
-        conf = confidence(signal, mode)
+        lot, risk = (0, 0)
+        if signal in ["AL", "SAT"] and price:
+            stop_dist = abs(cfg["upper"] - cfg["lower"]) * 0.3
+            lot, risk = calculate_lot(price, stop_dist)
 
-        stop = tp = lot = risk = 0
-
-        if signal == "AL":
-            stop = round(price - atr * STOP_MULT, 2)
-            tp = round(price + atr * TP_MULT, 2)
-            lot, risk = calc_risk(price, stop)
-
-        elif signal == "SAT":
-            stop = round(price + atr * STOP_MULT, 2)
-            tp = round(price - atr * TP_MULT, 2)
-            lot, risk = calc_risk(price, stop)
-
-        rows[s] = {
+        rows.append({
+            "symbol": s,
             "price": price,
             "lower": cfg["lower"],
             "upper": cfg["upper"],
             "signal": signal,
             "confidence": conf,
-            "mode": mode,
-            "stop": stop,
-            "tp": tp,
             "lot": lot,
-            "risk": risk,
-        }
+            "risk": risk
+        })
 
     return jsonify(rows)
 
-# ================= UI =================
+
+# ================== UI ==================
 @app.route("/", methods=["GET", "POST"])
 def home():
     if request.method == "POST":
-        s = request.form["symbol"]
-        WATCHLIST[s]["lower"] = float(request.form["lower"].replace(",", "."))
-        WATCHLIST[s]["upper"] = float(request.form["upper"].replace(",", "."))
-        WATCHLIST[s]["alerted"] = None
+        symbol = request.form["symbol"]
+        WATCHLIST[symbol]["lower"] = float(request.form["lower"].replace(",", "."))
+        WATCHLIST[symbol]["upper"] = float(request.form["upper"].replace(",", "."))
+        WATCHLIST[symbol]["alerted"] = None
 
-    return render_template_string("""
+    html = """
 <!DOCTYPE html>
 <html>
 <head>
 <title>BIST Profesyonel Trading Sistemi</title>
 <style>
-body{background:#0b0b0b;color:white;font-family:Arial;padding:30px}
-table{width:100%;border-collapse:collapse}
-th,td{padding:12px;border-bottom:1px solid #333;text-align:center}
-th{background:#1f1f1f}
-.green{background:#163b2c}
-.red{background:#3b1616}
-.badge{padding:6px 12px;border-radius:12px;font-weight:bold}
-.buy{background:#0f5132}
-.sell{background:#842029}
-.wait{background:#444}
-small{opacity:.7}
+body {
+    background:#0b0b0b;
+    color:#eaeaea;
+    font-family: Inter, Arial;
+    padding:40px;
+}
+h1 {
+    font-weight:600;
+    margin-bottom:20px;
+}
+.card {
+    background:#121212;
+    border-radius:14px;
+    padding:24px;
+    box-shadow:0 0 0 1px rgba(255,255,255,0.05);
+}
+table {
+    width:100%;
+    border-collapse:collapse;
+}
+th, td {
+    padding:14px;
+    border-bottom:1px solid #1f1f1f;
+    text-align:center;
+}
+th {
+    color:#aaa;
+    font-weight:500;
+}
+tr.buy { background:#0f2a1f; }
+tr.sell { background:#2a1212; }
+.badge {
+    padding:6px 14px;
+    border-radius:999px;
+    font-weight:600;
+    font-size:13px;
+}
+.al { background:#1f7a4f; }
+.sat { background:#7a1f1f; }
+.bekle { background:#444; }
+form {
+    margin-top:30px;
+    display:flex;
+    gap:10px;
+}
+input, select {
+    padding:10px;
+    border-radius:8px;
+    border:1px solid #333;
+    background:#0f0f0f;
+    color:white;
+}
+button {
+    padding:10px 18px;
+    border-radius:8px;
+    background:#2563eb;
+    color:white;
+    border:none;
+    cursor:pointer;
+}
+.footer {
+    margin-top:16px;
+    color:#777;
+    font-size:13px;
+}
 </style>
 </head>
 <body>
 
-<h2>📊 BIST Profesyonel Trading Sistemi</h2>
+<h1>📊 BIST Profesyonel Trading Sistemi</h1>
 
-<table id="t">
+<div class="card">
+<table>
 <thead>
 <tr>
-<th>Hisse</th><th>Fiyat</th><th>Alt</th><th>Üst</th>
-<th>Sinyal</th><th>Confidence</th>
-<th>Stop</th><th>TP</th>
-<th>Lot</th><th>Risk (TL)</th><th>Piyasa</th>
+<th>Hisse</th>
+<th>Fiyat</th>
+<th>Alt</th>
+<th>Üst</th>
+<th>Sinyal</th>
+<th>Confidence</th>
+<th>Lot</th>
+<th>Risk (TL)</th>
 </tr>
 </thead>
-<tbody></tbody>
+<tbody id="rows"></tbody>
 </table>
 
+<div class="footer">
+Otomatik yenileme: {{refresh}} sn • Manuel limit sistemi
+</div>
+</div>
+
+<div class="card" style="margin-top:30px;">
 <h3>Limit Güncelle</h3>
 <form method="post">
 <select name="symbol">
 {% for s in watchlist %}
-<option>{{s}}</option>
+<option value="{{s}}">{{s}}</option>
 {% endfor %}
 </select>
-<input name="lower" placeholder="Alt">
-<input name="upper" placeholder="Üst">
+<input name="lower" placeholder="Alt limit">
+<input name="upper" placeholder="Üst limit">
 <button>Güncelle</button>
 </form>
+</div>
 
 <script>
 async function refresh(){
- const r = await fetch("/api/data");
- const d = await r.json();
- let html="";
- for(const s in d){
-  const x=d[s];
-  const rowClass = x.signal=="AL"?"green":x.signal=="SAT"?"red":"";
-  html+=`<tr class="${rowClass}">
-  <td>${s}</td><td>${x.price}</td><td>${x.lower}</td><td>${x.upper}</td>
-  <td><span class="badge ${x.signal=='AL'?'buy':x.signal=='SAT'?'sell':'wait'}">${x.signal}</span></td>
-  <td>%${x.confidence}</td>
-  <td>${x.stop}</td><td>${x.tp}</td>
-  <td>${x.lot}</td><td>${x.risk}</td>
-  <td><small>${x.mode}</small></td>
-  </tr>`;
- }
- document.querySelector("#t tbody").innerHTML=html;
+    const r = await fetch("/api/data");
+    const data = await r.json();
+    const tbody = document.getElementById("rows");
+    tbody.innerHTML = "";
+
+    data.forEach(row => {
+        let cls = row.signal === "AL" ? "buy" : row.signal === "SAT" ? "sell" : "";
+        let badgeClass = row.signal === "AL" ? "al" : row.signal === "SAT" ? "sat" : "bekle";
+
+        tbody.innerHTML += `
+        <tr class="${cls}">
+            <td>${row.symbol}</td>
+            <td>${row.price ?? "-"}</td>
+            <td>${row.lower}</td>
+            <td>${row.upper}</td>
+            <td><span class="badge ${badgeClass}">${row.signal}</span></td>
+            <td>%${row.confidence}</td>
+            <td>${row.lot}</td>
+            <td>${row.risk}</td>
+        </tr>`;
+    });
 }
-setInterval(refresh, {{refresh}});
 refresh();
+setInterval(refresh, {{refresh}} * 1000);
 </script>
 
 </body>
 </html>
-""", watchlist=WATCHLIST, refresh=REFRESH_SEC*1000)
+"""
+    return render_template_string(html, watchlist=WATCHLIST, refresh=REFRESH_SECONDS)
 
-# ================= START =================
+
+# ================== START ==================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
