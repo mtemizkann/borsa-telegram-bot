@@ -12,8 +12,8 @@ TOKEN = os.environ["TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
 # ---- RISK AYARLARI ----
-ACCOUNT_SIZE = 200000      # TL
-RISK_PERCENT = 2           # %
+ACCOUNT_SIZE = 150000   # Senin mevcut paran
+RISK_PERCENT = 2        # %2 risk
 
 # ---- TAKİP EDİLEN HİSSELER ----
 WATCHLIST = {
@@ -98,7 +98,7 @@ def price_monitor():
                     stop = data["upper"]
                     lot, total_risk = calculate_position(price, stop)
 
-                    send(
+                    message = (
                         f"🔻 {symbol}\n"
                         f"Alt kırılım\n"
                         f"Giriş: {price}\n"
@@ -107,6 +107,7 @@ def price_monitor():
                         f"Risk: {total_risk:.2f} TL"
                     )
 
+                    send(message)
                     data["alerted"] = "lower"
 
                 # ÜST KIRILIM
@@ -115,7 +116,7 @@ def price_monitor():
                     stop = data["lower"]
                     lot, total_risk = calculate_position(price, stop)
 
-                    send(
+                    message = (
                         f"🔺 {symbol}\n"
                         f"Üst kırılım\n"
                         f"Giriş: {price}\n"
@@ -124,8 +125,10 @@ def price_monitor():
                         f"Risk: {total_risk:.2f} TL"
                     )
 
+                    send(message)
                     data["alerted"] = "upper"
 
+                # Aralığa dönerse reset
                 elif data["lower"] < price < data["upper"]:
                     data["alerted"] = None
 
@@ -168,7 +171,9 @@ def home():
     return render_template_string(html, watchlist=WATCHLIST.keys())
 
 
+# ---------------------------------------------------
 # THREAD BAŞLAT
+# ---------------------------------------------------
 monitor_thread = threading.Thread(target=price_monitor)
 monitor_thread.daemon = True
 monitor_thread.start()
