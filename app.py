@@ -144,7 +144,7 @@ def home():
     if request.method == "POST":
         symbol = request.form["symbol"]
         lower = float(request.form["lower"])
-        upper = float(request.form["upper"]
+        upper = float(request.form["upper"])
 
         WATCHLIST[symbol]["lower"] = lower
         WATCHLIST[symbol]["upper"] = upper
