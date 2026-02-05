@@ -15,9 +15,9 @@ ACCOUNT_SIZE = 150000
 RISK_PERCENT = 2
 
 WATCHLIST = {
-    "ASELS.IS": {"lower": 290, "upper": 310, "alerted": None},
-    "TUPRS.IS": {"lower": 140, "upper": 170, "alerted": None},
-    "EREGL.IS": {"lower": 40, "upper": 50, "alerted": None},
+    "ASELS.IS": {"reference_price": None, "alerted": None},
+    "TUPRS.IS": {"reference_price": None, "alerted": None},
+    "FROTO.IS": {"reference_price": None, "alerted": None},
 }
 
 TICKERS = {symbol: yf.Ticker(symbol) for symbol in WATCHLIST.keys()}
@@ -93,40 +93,55 @@ def price_monitor():
                     continue
 
                 price = float(hist["Close"].iloc[-1])
+                
+                # İlk fiyat alındığında referans fiyatı ayarla
+                if data["reference_price"] is None:
+                    data["reference_price"] = price
+                    continue
 
-                if price <= data["lower"] and data["alerted"] != "lower":
-                    stop = data["upper"]
+                reference = data["reference_price"]
+                lower = reference - 1.0
+                upper = reference + 1.0
+
+                if price <= lower and data["alerted"] != "lower":
+                    stop = upper
                     lot, total_risk = calculate_position(price, stop)
 
                     message = (
                         f"🔻 {symbol}\n"
-                        f"Alt kırılım\n"
-                        f"Giriş: {price}\n"
-                        f"Stop: {stop}\n"
+                        f"Alt kırılım (-1 TL)\n"
+                        f"Referans: {reference:.2f} TL\n"
+                        f"Güncel: {price:.2f} TL\n"
+                        f"Giriş: {price:.2f}\n"
+                        f"Stop: {stop:.2f}\n"
                         f"Lot: {lot}\n"
                         f"Risk: {total_risk:.2f} TL"
                     )
 
                     send(message)
                     data["alerted"] = "lower"
+                    data["reference_price"] = price  # Yeni referans fiyatı güncelle
 
-                elif price >= data["upper"] and data["alerted"] != "upper":
-                    stop = data["lower"]
+                elif price >= upper and data["alerted"] != "upper":
+                    stop = lower
                     lot, total_risk = calculate_position(price, stop)
 
                     message = (
                         f"🔺 {symbol}\n"
-                        f"Üst kırılım\n"
-                        f"Giriş: {price}\n"
-                        f"Stop: {stop}\n"
+                        f"Üst kırılım (+1 TL)\n"
+                        f"Referans: {reference:.2f} TL\n"
+                        f"Güncel: {price:.2f} TL\n"
+                        f"Giriş: {price:.2f}\n"
+                        f"Stop: {stop:.2f}\n"
                         f"Lot: {lot}\n"
                         f"Risk: {total_risk:.2f} TL"
                     )
 
                     send(message)
                     data["alerted"] = "upper"
+                    data["reference_price"] = price  # Yeni referans fiyatı güncelle
 
-                elif data["lower"] < price < data["upper"]:
+                elif lower < price < upper:
                     data["alerted"] = None
 
             time.sleep(30)
@@ -138,41 +153,43 @@ def price_monitor():
 
 @app.route("/api/prices")
 def api_prices():
-    """Anlık fiyatları JSON döndürür (panel otomatik güncelleme için)."""
-    return jsonify(get_current_prices())
+    """Anlık fiyatları ve referans fiyatları JSON döndürür (panel otomatik güncelleme için)."""
+    prices = get_current_prices()
+    result = {}
+    for symbol in WATCHLIST:
+        price = prices.get(symbol)
+        ref_price = WATCHLIST[symbol].get("reference_price")
+        result[symbol] = {
+            "price": price,
+            "reference_price": ref_price,
+            "lower": ref_price - 1.0 if ref_price is not None else None,
+            "upper": ref_price + 1.0 if ref_price is not None else None,
+        }
+    return jsonify(result)
 
 
 @app.route("/", methods=["GET", "POST"])
 def home():
     error = None
-    if request.method == "POST":
-        symbol = request.form.get("symbol", "").strip()
-        if symbol not in WATCHLIST:
-            error = "Geçersiz hisse seçimi."
-        else:
-            lower_raw = (request.form.get("lower") or "").strip().replace(",", ".")
-            upper_raw = (request.form.get("upper") or "").strip().replace(",", ".")
-
-            try:
-                lower = float(lower_raw)
-                upper = float(upper_raw)
-            except ValueError:
-                error = "Alt ve üst limit geçerli bir sayı olmalı (virgül veya nokta kullanabilirsiniz)."
-            else:
-                WATCHLIST[symbol]["lower"] = lower
-                WATCHLIST[symbol]["upper"] = upper
-                WATCHLIST[symbol]["alerted"] = None
 
     prices = get_current_prices()
-    price_rows = [
-        {
+    price_rows = []
+    for s in WATCHLIST:
+        price = prices.get(s)
+        ref_price = WATCHLIST[s].get("reference_price")
+        if ref_price is not None and price is not None:
+            lower = ref_price - 1.0
+            upper = ref_price + 1.0
+        else:
+            lower = None
+            upper = None
+        price_rows.append({
             "symbol": s,
-            "price": prices.get(s),
-            "lower": WATCHLIST[s]["lower"],
-            "upper": WATCHLIST[s]["upper"],
-        }
-        for s in WATCHLIST
-    ]
+            "price": price,
+            "lower": lower,
+            "upper": upper,
+            "reference_price": ref_price,
+        })
 
     html = """
     <!DOCTYPE html>
@@ -213,8 +230,8 @@ def home():
                 {% for row in price_rows %}
                 <tr>
                     <td>{{ row.symbol }}</td>
-                    <td class="price-cell" data-symbol="{{ row.symbol }}" data-lower="{{ row.lower }}" data-upper="{{ row.upper }}">{{ row.price if row.price is not none else "—" }}</td>
-                    <td>{{ row.lower }} / {{ row.upper }}</td>
+                    <td class="price-cell" data-symbol="{{ row.symbol }}" data-lower="{{ row.lower if row.lower is not none else '' }}" data-upper="{{ row.upper if row.upper is not none else '' }}">{{ row.price if row.price is not none else "—" }}</td>
+                    <td>{% if row.lower is not none %}{{ "%.2f"|format(row.lower) }} / {{ "%.2f"|format(row.upper) }}{% else %}—{% endif %}</td>
                     <td class="status-cell" data-symbol="{{ row.symbol }}">—</td>
                 </tr>
                 {% endfor %}
@@ -230,25 +247,18 @@ def home():
     <p class="error">{{ error }}</p>
     {% endif %}
 
-    <form method="post">
-        <label>Hisse:</label>
-        <select name="symbol">
-            {% for row in price_rows %}
-            <option value="{{ row.symbol }}">{{ row.symbol }}</option>
-            {% endfor %}
-        </select><br><br>
-        <label>Alt Limit:</label> <input name="lower" placeholder="Örn: 290 veya 290,5"><br><br>
-        <label>Üst Limit:</label> <input name="upper" placeholder="Örn: 310 veya 310,25"><br><br>
-        <button type="submit">Güncelle</button>
-    </form>
+    <p style="font-size: 14px; color: #666; margin-top: 20px;">
+        <strong>Not:</strong> Sistem otomatik olarak her hisse için güncel fiyat ±1 TL aralığında alarm verir. 
+        Referans fiyat ilk fiyat alındığında belirlenir ve alarm verildikten sonra güncellenir.
+    </p>
 
     <script>
     function setStatus(cell, price, lower, upper) {
         cell.classList.remove("in-range", "above", "below");
-        if (price == null) { cell.textContent = "—"; return; }
-        if (price <= lower) { cell.textContent = "Alt kırılım"; cell.classList.add("below"); }
-        else if (price >= upper) { cell.textContent = "Üst kırılım"; cell.classList.add("above"); }
-        else { cell.textContent = "Bant içi"; cell.classList.add("in-range"); }
+        if (price == null || lower == null || upper == null) { cell.textContent = "—"; return; }
+        if (price <= lower) { cell.textContent = "Alt kırılım (-1 TL)"; cell.classList.add("below"); }
+        else if (price >= upper) { cell.textContent = "Üst kırılım (+1 TL)"; cell.classList.add("above"); }
+        else { cell.textContent = "Bant içi (±1 TL)"; cell.classList.add("in-range"); }
     }
     function updatePrices() {
         fetch("/api/prices")
@@ -256,11 +266,26 @@ def home():
             .then(function(data) {
                 document.querySelectorAll(".price-cell").forEach(function(cell) {
                     var sym = cell.dataset.symbol;
-                    var lower = parseFloat(cell.dataset.lower);
-                    var upper = parseFloat(cell.dataset.upper);
-                    var price = data[sym] != null ? data[sym] : null;
+                    var symbolData = data[sym];
+                    if (!symbolData) return;
+                    
+                    var price = symbolData.price;
+                    var lower = symbolData.lower;
+                    var upper = symbolData.upper;
+                    
                     cell.textContent = price != null ? price : "—";
                     if (price != null) cell.classList.remove("no-price"); else cell.classList.add("no-price");
+                    
+                    // Alt/Üst limitleri güncelle
+                    var limitCell = cell.parentElement.querySelector("td:nth-child(3)");
+                    if (limitCell) {
+                        if (lower != null && upper != null) {
+                            limitCell.textContent = lower.toFixed(2) + " / " + upper.toFixed(2);
+                        } else {
+                            limitCell.textContent = "—";
+                        }
+                    }
+                    
                     var statusCell = cell.parentElement.querySelector(".status-cell");
                     if (statusCell) setStatus(statusCell, price, lower, upper);
                 });
