@@ -126,12 +126,17 @@ def price_monitor():
 def home():
     if request.method == "POST":
         symbol = request.form["symbol"]
-        lower = float(request.form["lower"])
-        upper = float(request.form["upper"])
+
+        lower_raw = request.form["lower"].replace(",", ".")
+        upper_raw = request.form["upper"].replace(",", ".")
+
+        lower = float(lower_raw)
+        upper = float(upper_raw)
 
         WATCHLIST[symbol]["lower"] = lower
         WATCHLIST[symbol]["upper"] = upper
         WATCHLIST[symbol]["alerted"] = None
+
 
     html = """
     <h2>BIST Alarm Paneli</h2>
