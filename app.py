@@ -26,7 +26,6 @@ def send(msg):
     except:
         pass
 
-
 def price_monitor():
     while True:
         try:
@@ -42,3 +41,25 @@ def price_monitor():
                 # ALT seviye
                 if price <= data["lower"] and data["alerted"] != "lower":
                     send(f"🔻 {symbol}\nAlt seviye!\nFiyat: {price}")
+                    data["alerted"] = "lower"
+
+                # ÜST seviye
+                elif price >= data["upper"] and data["alerted"] != "upper":
+                    send(f"🔺 {symbol}\nÜst seviye!\nFiyat: {price}")
+                    data["alerted"] = "upper"
+
+                # Aralığa geri dönerse reset
+                elif data["lower"] < price < data["upper"]:
+                    data["alerted"] = None
+
+        except Exception as e:
+            print("HATA:", e)
+
+        time.sleep(30)  # 30 saniyede bir kontrol
+
+@app.route("/")
+def home():
+    return "Bot is running"
+
+# Thread başlat
+threading.Thread(target=price_monitor, daemon=True).start()
