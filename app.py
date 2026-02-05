@@ -14,9 +14,9 @@ CHAT_ID = os.environ["CHAT_ID"]
 # TAKİP EDİLEN HİSSELER
 # ==============================
 WATCHLIST = {
-    "ASELS.IS": {"lower": 290, "upper": 310, "alerted": False},
-    "TUPRS.IS": {"lower": 140, "upper": 170, "alerted": False},
-    "EREGL.IS": {"lower": 40, "upper": 50, "alerted": False},
+    "ASELS.IS": {"lower": 290, "upper": 310, "alerted": None},
+    "TUPRS.IS": {"lower": 140, "upper": 170, "alerted": None},
+    "EREGL.IS": {"lower": 40, "upper": 50, "alerted": None},
 }
 
 # ==============================
@@ -30,28 +30,19 @@ def send(msg):
     })
 
 # ==============================
-# FİYAT KONTROL LOOP
+# FİYAT KONTROL
 # ==============================
 def price_monitor():
     while True:
         for symbol, data in WATCHLIST.items():
             try:
                 ticker = yf.Ticker(symbol)
-                price = ticker.history(period="1d")["Close"].iloc[-1]
+                price = ticker.history(period="1d", interval="1m")["Close"].iloc[-1]
 
-                # ALT SEVİYE
-                if price <= data["lower"] and not data["alerted"]:
+                # ALT
+                if price <= data["lower"] and data["alerted"] != "lower":
                     send(f"🔻 {symbol} ALT SEVİYEYE GELDİ\nFiyat: {price}")
-                    data["alerted"] = True
+                    data["alerted"] = "lower"
 
-                # ÜST SEVİYE
-                elif price >= data["upper"] and not data["alerted"]:
-                    send(f"🚀 {symbol} ÜST SEVİYEYE GELDİ\nFiyat: {price}")
-                    data["alerted"] = True
-
-                # Tekrar alarm açma reseti
-                if data["lower"] < price < data["upper"]:
-                    data["alerted"] = False
-
-            except Exception as e:
-                print(f"Hata: {s
+                # ÜST
+                elif price >= data["upper"] and data["alerted"] != "u
