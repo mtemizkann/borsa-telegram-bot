@@ -3,12 +3,12 @@ import time
 import threading
 import requests
 import yfinance as yf
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, request, render_template_string, jsonify
 from datetime import datetime
 
 app = Flask(__name__)
 
-# ================== AYARLAR ==================
+# ================== CONFIG ==================
 ACCOUNT_SIZE = 150000
 RISK_PERCENT = 2
 
@@ -20,41 +20,52 @@ WATCHLIST = {
 
 TICKERS = {s: yf.Ticker(s) for s in WATCHLIST}
 
-
 # ================== MARKET ==================
 def market_open():
     now = datetime.now()
-    if now.weekday() >= 5:
-        return False
-    return 9 <= now.hour < 18
+    return now.weekday() < 5 and 9 <= now.hour < 18
 
+# ================== DATA ==================
+def get_price_data(symbol):
+    try:
+        df = TICKERS[symbol].history(period="1d", interval="5m")
+        if len(df) < 5:
+            return None
+        return df
+    except:
+        return None
 
-# ================== PRICE ==================
-def get_prices():
-    prices = {}
-    for s in WATCHLIST:
-        try:
-            hist = TICKERS[s].history(period="1d", interval="1m")
-            prices[s] = round(float(hist["Close"].iloc[-1]), 2) if not hist.empty else None
-        except Exception:
-            prices[s] = None
-    return prices
+# ================== CONFIDENCE ENGINE ==================
+def calculate_confidence(price, lower, upper, df):
+    score = 0
 
-
-# ================== ALARM ==================
-def alarm_status(price, lower, upper):
-    if price is None:
-        return "VERİ YOK"
+    # 1️⃣ Seviye yakınlığı (%40)
+    range_size = upper - lower
     if price <= lower:
-        return "ALT ALARM"
-    if price >= upper:
-        return "ÜST ALARM"
-    return "NORMAL"
+        score += 40
+    elif price >= upper:
+        score += 40
+    else:
+        dist = min(abs(price - lower), abs(price - upper))
+        score += max(0, 40 - (dist / range_size) * 40)
 
+    # 2️⃣ Momentum (%40)
+    closes = df["Close"].iloc[-4:]
+    momentum = closes.diff().sum()
+    if momentum > 0:
+        score += 40
+    elif momentum < 0:
+        score += 20
 
-# ================== SİNYAL ==================
-def generate_signal(price, lower, upper):
-    if price is None:
+    # 3️⃣ Sahte kırılım filtresi (%20)
+    if closes.iloc[-1] > closes.mean():
+        score += 20
+
+    return round(min(score, 100), 1)
+
+# ================== SIGNAL ==================
+def generate_signal(price, lower, upper, confidence):
+    if confidence < 40:
         return "BEKLE"
     if price <= lower:
         return "AL"
@@ -62,150 +73,117 @@ def generate_signal(price, lower, upper):
         return "SAT"
     return "BEKLE"
 
-
 # ================== LOT & RISK ==================
-def calculate_position(price, lower, upper, signal):
-    if signal == "BEKLE" or price is None:
+def calculate_lot(price, stop, confidence):
+    if confidence < 50:
         return 0, 0
 
-    stop = upper if signal == "AL" else lower
-    risk_per_share = abs(price - stop)
-    if risk_per_share == 0:
+    risk_amount = ACCOUNT_SIZE * (RISK_PERCENT / 100) * (confidence / 100)
+    per_unit_risk = abs(price - stop)
+    if per_unit_risk == 0:
         return 0, 0
 
-    risk_amount = ACCOUNT_SIZE * (RISK_PERCENT / 100)
-    lot = int(risk_amount / risk_per_share)
-    total_risk = round(lot * risk_per_share, 2)
-
-    return lot, total_risk
-
+    lot = int(risk_amount / per_unit_risk)
+    return lot, round(lot * per_unit_risk, 2)
 
 # ================== API ==================
 @app.route("/api/data")
 def api_data():
-    prices = get_prices()
-    rows = []
+    result = []
 
-    for s in WATCHLIST:
-        price = prices[s]
-        lower = WATCHLIST[s]["lower"]
-        upper = WATCHLIST[s]["upper"]
+    for s, limits in WATCHLIST.items():
+        df = get_price_data(s)
+        if df is None:
+            continue
 
-        alarm = alarm_status(price, lower, upper)
-        signal = generate_signal(price, lower, upper)
-        lot, risk = calculate_position(price, lower, upper, signal)
+        price = round(float(df["Close"].iloc[-1]), 2)
+        lower, upper = limits["lower"], limits["upper"]
 
-        rows.append({
+        confidence = calculate_confidence(price, lower, upper, df)
+        signal = generate_signal(price, lower, upper, confidence)
+
+        stop = upper if signal == "AL" else lower
+        lot, risk = calculate_lot(price, stop, confidence)
+
+        alarm = "NORMAL"
+        if price <= lower:
+            alarm = "ALT ALARM"
+        elif price >= upper:
+            alarm = "ÜST ALARM"
+
+        result.append({
             "symbol": s,
             "price": price,
             "lower": lower,
             "upper": upper,
             "alarm": alarm,
             "signal": signal,
+            "confidence": confidence,
             "lot": lot,
             "risk": risk
         })
 
-    return jsonify(rows)
+    return jsonify(result)
 
-
-# ================== PANEL ==================
-@app.route("/", methods=["GET", "POST"])
+# ================== UI ==================
+@app.route("/")
 def home():
-    if request.method == "POST":
-        s = request.form["symbol"]
-        WATCHLIST[s]["lower"] = float(request.form["lower"].replace(",", "."))
-        WATCHLIST[s]["upper"] = float(request.form["upper"].replace(",", "."))
-
     html = """
-<!DOCTYPE html>
-<html>
-<head>
-<title>BIST Professional Trading System</title>
-<style>
-body { background:#0b0b0b; color:white; font-family:Arial; padding:40px; }
-table { width:100%; border-collapse:collapse; margin-bottom:30px; }
-th,td { padding:12px; border-bottom:1px solid #333; text-align:center; }
-th { background:#1e1e1e; }
+    <html>
+    <head>
+        <title>BIST Profesyonel Trading Sistemi</title>
+        <style>
+            body { background:#0e0e0e; color:white; font-family:Arial; padding:40px; }
+            table { width:100%; border-collapse:collapse; }
+            th, td { padding:12px; text-align:center; border-bottom:1px solid #333; }
+            th { background:#1e1e1e; }
+            .AL { background:#0f5132; }
+            .SAT { background:#842029; }
+            .BEKLE { background:#41464b; }
+        </style>
+    </head>
+    <body>
+        <h2>📊 BIST Profesyonel Trading Sistemi</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Hisse</th><th>Fiyat</th><th>Alt</th><th>Üst</th>
+                    <th>Alarm</th><th>Sinyal</th><th>Confidence %</th>
+                    <th>Lot</th><th>Risk (TL)</th>
+                </tr>
+            </thead>
+            <tbody id="body"></tbody>
+        </table>
 
-.alt { background:#4a0000; }
-.ust { background:#003a2b; }
+        <script>
+        async function load() {
+            const r = await fetch("/api/data");
+            const d = await r.json();
+            const b = document.getElementById("body");
+            b.innerHTML = "";
+            d.forEach(x => {
+                b.innerHTML += `
+                <tr class="${x.signal}">
+                    <td>${x.symbol}</td>
+                    <td>${x.price}</td>
+                    <td>${x.lower}</td>
+                    <td>${x.upper}</td>
+                    <td>${x.alarm}</td>
+                    <td>${x.signal}</td>
+                    <td>%${x.confidence}</td>
+                    <td>${x.lot}</td>
+                    <td>${x.risk}</td>
+                </tr>`;
+            });
+        }
+        setInterval(load, 15000);
+        load();
+        </script>
+    </body>
+    </html>
+    """
+    return render_template_string(html)
 
-.badge { padding:6px 14px; border-radius:14px; font-weight:bold; }
-.buy { background:#0f5132; }
-.sell { background:#842029; }
-.wait { background:#41464b; }
-
-input,select { padding:8px; }
-button { padding:10px 20px; background:#0a84ff; border:none; color:white; }
-</style>
-</head>
-
-<body>
-<h2>📊 BIST Profesyonel Trading Sistemi</h2>
-
-<table>
-<thead>
-<tr>
-<th>Hisse</th>
-<th>Fiyat</th>
-<th>Alt</th>
-<th>Üst</th>
-<th>Alarm</th>
-<th>Sinyal</th>
-<th>Lot</th>
-<th>Risk (TL)</th>
-</tr>
-</thead>
-<tbody id="table"></tbody>
-</table>
-
-<h3>Limit Güncelle</h3>
-<form method="post">
-<select name="symbol">
-{% for s in watchlist %}
-<option>{{s}}</option>
-{% endfor %}
-</select>
-<input name="lower" placeholder="Alt">
-<input name="upper" placeholder="Üst">
-<button>Güncelle</button>
-</form>
-
-<script>
-async function refresh(){
- const r = await fetch("/api/data");
- const d = await r.json();
- const tb = document.getElementById("table");
- tb.innerHTML = "";
-
- d.forEach(row=>{
-   let tr = document.createElement("tr");
-   if(row.alarm==="ALT ALARM") tr.className="alt";
-   if(row.alarm==="ÜST ALARM") tr.className="ust";
-
-   tr.innerHTML = `
-   <td>${row.symbol}</td>
-   <td>${row.price ?? "-"}</td>
-   <td>${row.lower}</td>
-   <td>${row.upper}</td>
-   <td>${row.alarm}</td>
-   <td><span class="badge ${row.signal==="AL"?"buy":row.signal==="SAT"?"sell":"wait"}">${row.signal}</span></td>
-   <td>${row.lot}</td>
-   <td>${row.risk}</td>
-   `;
-   tb.appendChild(tr);
- });
-}
-setInterval(refresh,15000);
-refresh();
-</script>
-
-</body>
-</html>
-"""
-    return render_template_string(html, watchlist=WATCHLIST)
-
-
+# ================== START ==================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
