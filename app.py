@@ -153,6 +153,8 @@ def home():
     return render_template_string(html, watchlist=WATCHLIST.keys())
 
 
-monitor_thread = threading.Thread(target=price_monitor)
-monitor_thread.daemon = True
-monitor_thread.start()
+if __name__ == "__main__":
+    monitor_thread = threading.Thread(target=price_monitor)
+    monitor_thread.daemon = True
+    monitor_thread.start()
+    app.run(host="0.0.0.0", port=8080)
