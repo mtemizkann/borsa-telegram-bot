@@ -3,13 +3,13 @@ import time
 import threading
 import requests
 import yfinance as yf
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, jsonify
 from datetime import datetime
 
 app = Flask(__name__)
 
-TOKEN = os.environ["TOKEN"]
-CHAT_ID = os.environ["CHAT_ID"]
+TOKEN = os.environ.get("TOKEN", "")
+CHAT_ID = os.environ.get("CHAT_ID", "")
 
 ACCOUNT_SIZE = 150000
 RISK_PERCENT = 2
@@ -33,6 +33,8 @@ def market_open():
 
 
 def send(message):
+    if not TOKEN or not CHAT_ID:
+        return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
         requests.post(
@@ -56,6 +58,21 @@ def calculate_position(entry, stop):
     return lot, total_risk
 
 
+def get_current_prices():
+    """Watchlist'teki hisselerin anlık fiyatlarını döndürür."""
+    prices = {}
+    for symbol in WATCHLIST:
+        try:
+            hist = TICKERS[symbol].history(period="1d", interval="1m", actions=False)
+            if not hist.empty:
+                prices[symbol] = round(float(hist["Close"].iloc[-1]), 2)
+            else:
+                prices[symbol] = None
+        except Exception:
+            prices[symbol] = None
+    return prices
+
+
 def price_monitor():
     print("Price monitor started")
 
@@ -66,7 +83,6 @@ def price_monitor():
                 continue
 
             for symbol, data in WATCHLIST.items():
-
                 hist = TICKERS[symbol].history(
                     period="1d",
                     interval="1m",
@@ -79,7 +95,6 @@ def price_monitor():
                 price = float(hist["Close"].iloc[-1])
 
                 if price <= data["lower"] and data["alerted"] != "lower":
-
                     stop = data["upper"]
                     lot, total_risk = calculate_position(price, stop)
 
@@ -96,7 +111,6 @@ def price_monitor():
                     data["alerted"] = "lower"
 
                 elif price >= data["upper"] and data["alerted"] != "upper":
-
                     stop = data["lower"]
                     lot, total_risk = calculate_position(price, stop)
 
@@ -122,44 +136,157 @@ def price_monitor():
             time.sleep(10)
 
 
+@app.route("/api/prices")
+def api_prices():
+    """Anlık fiyatları JSON döndürür (panel otomatik güncelleme için)."""
+    return jsonify(get_current_prices())
+
+
 @app.route("/", methods=["GET", "POST"])
 def home():
+    error = None
     if request.method == "POST":
-        symbol = request.form["symbol"]
+        symbol = request.form.get("symbol", "").strip()
+        if symbol not in WATCHLIST:
+            error = "Geçersiz hisse seçimi."
+        else:
+            lower_raw = (request.form.get("lower") or "").strip().replace(",", ".")
+            upper_raw = (request.form.get("upper") or "").strip().replace(",", ".")
 
-        lower_raw = request.form["lower"].replace(",", ".")
-        upper_raw = request.form["upper"].replace(",", ".")
+            try:
+                lower = float(lower_raw)
+                upper = float(upper_raw)
+            except ValueError:
+                error = "Alt ve üst limit geçerli bir sayı olmalı (virgül veya nokta kullanabilirsiniz)."
+            else:
+                WATCHLIST[symbol]["lower"] = lower
+                WATCHLIST[symbol]["upper"] = upper
+                WATCHLIST[symbol]["alerted"] = None
 
-        lower = float(lower_raw)
-        upper = float(upper_raw)
-
-        WATCHLIST[symbol]["lower"] = lower
-        WATCHLIST[symbol]["upper"] = upper
-        WATCHLIST[symbol]["alerted"] = None
-
+    prices = get_current_prices()
+    price_rows = [
+        {
+            "symbol": s,
+            "price": prices.get(s),
+            "lower": WATCHLIST[s]["lower"],
+            "upper": WATCHLIST[s]["upper"],
+        }
+        for s in WATCHLIST
+    ]
 
     html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>BIST Alarm Paneli</title>
+        <style>
+            body { font-family: system-ui, sans-serif; max-width: 520px; margin: 24px auto; padding: 0 16px; }
+            h2 { margin-top: 0; }
+            .prices { background: #f5f5f5; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; }
+            .prices table { width: 100%; border-collapse: collapse; }
+            .prices th, .prices td { text-align: left; padding: 8px; }
+            .prices th { color: #555; font-weight: 600; }
+            .price-cell { font-weight: 600; }
+            .in-range { color: #0a0; }
+            .above { color: #c00; }
+            .below { color: #00a; }
+            .no-price { color: #999; }
+            .refresh { font-size: 12px; color: #666; margin-top: 8px; }
+            form label { display: inline-block; width: 80px; }
+            form input[type="text"], form select { padding: 6px; margin: 4px 0; }
+            form button { padding: 8px 16px; margin-top: 8px; cursor: pointer; }
+            .error { color: #c00; margin-bottom: 12px; }
+        </style>
+    </head>
+    <body>
     <h2>BIST Alarm Paneli</h2>
+
+    <div class="prices">
+        <h3 style="margin: 0 0 10px 0;">Anlık Fiyatlar</h3>
+        <table>
+            <thead>
+                <tr><th>Hisse</th><th>Anlık Fiyat</th><th>Alt / Üst</th><th>Durum</th></tr>
+            </thead>
+            <tbody id="price-body">
+                {% for row in price_rows %}
+                <tr>
+                    <td>{{ row.symbol }}</td>
+                    <td class="price-cell" data-symbol="{{ row.symbol }}" data-lower="{{ row.lower }}" data-upper="{{ row.upper }}">{{ row.price if row.price is not none else "—" }}</td>
+                    <td>{{ row.lower }} / {{ row.upper }}</td>
+                    <td class="status-cell" data-symbol="{{ row.symbol }}">—</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <div class="refresh">
+            Son güncelleme: <span id="last-update">yüklendi</span>
+            <button type="button" id="btn-refresh" style="margin-left: 12px; padding: 4px 10px; cursor: pointer;">Yenile</button>
+        </div>
+    </div>
+
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+
     <form method="post">
-        Hisse:
+        <label>Hisse:</label>
         <select name="symbol">
-        {% for s in watchlist %}
-            <option value="{{s}}">{{s}}</option>
-        {% endfor %}
+            {% for row in price_rows %}
+            <option value="{{ row.symbol }}">{{ row.symbol }}</option>
+            {% endfor %}
         </select><br><br>
-
-        Alt Limit: <input name="lower"><br><br>
-        Üst Limit: <input name="upper"><br><br>
-
+        <label>Alt Limit:</label> <input name="lower" placeholder="Örn: 290 veya 290,5"><br><br>
+        <label>Üst Limit:</label> <input name="upper" placeholder="Örn: 310 veya 310,25"><br><br>
         <button type="submit">Güncelle</button>
     </form>
+
+    <script>
+    function setStatus(cell, price, lower, upper) {
+        cell.classList.remove("in-range", "above", "below");
+        if (price == null) { cell.textContent = "—"; return; }
+        if (price <= lower) { cell.textContent = "Alt kırılım"; cell.classList.add("below"); }
+        else if (price >= upper) { cell.textContent = "Üst kırılım"; cell.classList.add("above"); }
+        else { cell.textContent = "Bant içi"; cell.classList.add("in-range"); }
+    }
+    function updatePrices() {
+        fetch("/api/prices")
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                document.querySelectorAll(".price-cell").forEach(function(cell) {
+                    var sym = cell.dataset.symbol;
+                    var lower = parseFloat(cell.dataset.lower);
+                    var upper = parseFloat(cell.dataset.upper);
+                    var price = data[sym] != null ? data[sym] : null;
+                    cell.textContent = price != null ? price : "—";
+                    if (price != null) cell.classList.remove("no-price"); else cell.classList.add("no-price");
+                    var statusCell = cell.parentElement.querySelector(".status-cell");
+                    if (statusCell) setStatus(statusCell, price, lower, upper);
+                });
+                var el = document.getElementById("last-update");
+                if (el) el.textContent = new Date().toLocaleTimeString("tr-TR");
+            })
+            .catch(function() {});
+    }
+    setInterval(updatePrices, 30000);
+    setTimeout(updatePrices, 2000);
+    document.getElementById("btn-refresh").onclick = updatePrices;
+    </script>
+    </body>
+    </html>
     """
 
-    return render_template_string(html, watchlist=WATCHLIST.keys())
+    return render_template_string(
+        html,
+        price_rows=price_rows,
+        error=error,
+    )
 
+
+monitor_thread = threading.Thread(target=price_monitor)
+monitor_thread.daemon = True
+monitor_thread.start()
 
 if __name__ == "__main__":
-    monitor_thread = threading.Thread(target=price_monitor)
-    monitor_thread.daemon = True
-    monitor_thread.start()
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
