@@ -7,6 +7,7 @@ from flask import Flask
 
 app = Flask(__name__)
 
+# Environment variables
 TOKEN = os.environ["TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
@@ -18,17 +19,18 @@ WATCHLIST = {
 }
 
 # Ticker objelerini bir kere oluştur
-TICKERS = {s: yf.Ticker(s) for s in WATCHLIST.keys()}
+TICKERS = {symbol: yf.Ticker(symbol) for symbol in WATCHLIST.keys()}
 
 
-def send(msg):
+def send(message):
+    """Telegram mesaj gönderir"""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
         requests.post(
             url,
             json={
                 "chat_id": CHAT_ID,
-                "text": msg
+                "text": message
             },
             timeout=5
         )
@@ -37,12 +39,18 @@ def send(msg):
 
 
 def price_monitor():
+    """Fiyatları sürekli kontrol eder"""
     print("Fiyat takibi başladı...")
+
     while True:
         try:
             for symbol, data in WATCHLIST.items():
 
-                hist = TICKERS[symbol].history(period="1d", interval="1m", actions=False)
+                hist = TICKERS[symbol].history(
+                    period="1d",
+                    interval="1m",
+                    actions=False
+                )
 
                 if hist.empty:
                     continue
@@ -74,8 +82,12 @@ def home():
     return "Bot is running"
 
 
-# Thread başlat
-if __name__ == "__main__":
-    threading.Thread(target=price_monitor, daemon=True).start()
-    app.run(host="0.0.0.0", port=5000)
+# Gunicorn ile uyumlu thread başlatma
+thread_started = False
 
+@app.before_first_request
+def start_monitor():
+    global thread_started
+    if not thread_started:
+        threading.Thread(target=price_monitor, daemon=True).start()
+        thread_started = True
