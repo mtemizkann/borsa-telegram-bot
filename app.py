@@ -60,7 +60,7 @@ def price_monitor():
                 elif data["lower"] < price < data["upper"]:
                     data["alerted"] = None
 
-            time.sleep(60)
+            time.sleep(30)
 
         except Exception as e:
             print("Monitor error:", e)
