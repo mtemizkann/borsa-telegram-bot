@@ -1,49 +1,57 @@
 import os
-import math
+import time
+import threading
 import requests
-from flask import Flask, request, jsonify
+import yfinance as yf
+from flask import Flask
 
 app = Flask(__name__)
 
 TOKEN = os.environ["TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
-SECRET = os.environ["SECRET"]
 
-def send(text):
+# ==============================
+# TAKİP EDİLEN HİSSELER
+# ==============================
+WATCHLIST = {
+    "ASELS.IS": {"lower": 290, "upper": 310, "alerted": False},
+    "TUPRS.IS": {"lower": 140, "upper": 170, "alerted": False},
+    "EREGL.IS": {"lower": 40, "upper": 50, "alerted": False},
+}
+
+# ==============================
+# TELEGRAM MESAJ
+# ==============================
+def send(msg):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     requests.post(url, json={
         "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML"
+        "text": msg
     })
 
-@app.route("/")
-def home():
-    return "Bot is running"
+# ==============================
+# FİYAT KONTROL LOOP
+# ==============================
+def price_monitor():
+    while True:
+        for symbol, data in WATCHLIST.items():
+            try:
+                ticker = yf.Ticker(symbol)
+                price = ticker.history(period="1d")["Close"].iloc[-1]
 
-@app.route("/tv", methods=["POST"])
-def tv():
-    data = request.json
+                # ALT SEVİYE
+                if price <= data["lower"] and not data["alerted"]:
+                    send(f"🔻 {symbol} ALT SEVİYEYE GELDİ\nFiyat: {price}")
+                    data["alerted"] = True
 
-    if data.get("passphrase") != SECRET:
-        return jsonify({"error": "unauthorized"}), 401
+                # ÜST SEVİYE
+                elif price >= data["upper"] and not data["alerted"]:
+                    send(f"🚀 {symbol} ÜST SEVİYEYE GELDİ\nFiyat: {price}")
+                    data["alerted"] = True
 
-    symbol = data["symbol"]
-    price = float(data["price"])
-    stop = float(data["stop"])
-    account = float(data["account_try"])
-    risk = float(data["risk_pct"])
+                # Tekrar alarm açma reseti
+                if data["lower"] < price < data["upper"]:
+                    data["alerted"] = False
 
-    risk_amount = account * (risk/100)
-    qty = math.floor(risk_amount / abs(price-stop))
-
-    msg = f"""
-<b>{symbol} Sinyal</b>
-Giriş: {price}
-Stop: {stop}
-Önerilen Lot: {qty}
-"""
-
-    send(msg)
-
-    return jsonify({"ok": True})
+            except Exception as e:
+                print(f"Hata: {s
