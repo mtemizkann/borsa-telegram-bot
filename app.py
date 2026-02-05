@@ -49,17 +49,14 @@ def price_monitor():
 
                 price = float(hist["Close"].iloc[-1])
 
-                # ALT
                 if price <= data["lower"] and data["alerted"] != "lower":
                     send(f"🔻 {symbol}\nAlt seviye kırıldı\nFiyat: {price}")
                     data["alerted"] = "lower"
 
-                # ÜST
                 elif price >= data["upper"] and data["alerted"] != "upper":
                     send(f"🔺 {symbol}\nÜst seviye kırıldı\nFiyat: {price}")
                     data["alerted"] = "upper"
 
-                # Aralığa dönerse reset
                 elif data["lower"] < price < data["upper"]:
                     data["alerted"] = None
 
@@ -70,14 +67,12 @@ def price_monitor():
             time.sleep(10)
 
 
+# 👇 Thread burada başlatılıyor (Gunicorn ile uyumlu)
+monitor_thread = threading.Thread(target=price_monitor)
+monitor_thread.daemon = True
+monitor_thread.start()
+
+
 @app.route("/")
 def home():
     return "Bot is running 🚀"
-
-
-if __name__ == "__main__":
-    thread = threading.Thread(target=price_monitor)
-    thread.daemon = True
-    thread.start()
-
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
