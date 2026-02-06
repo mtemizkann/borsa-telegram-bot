@@ -5,7 +5,7 @@ from datetime import datetime
 
 import requests
 import yfinance as yf
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 app = Flask(__name__)
 
@@ -16,9 +16,9 @@ REFRESH_SECONDS = 10
 ACCOUNT_RISK_TL = 3000
 
 WATCHLIST = {
-    "ASELS.IS": {"lower": 284, "upper": 286, "signal": "BEKLE", "confidence": 50},
-    "TUPRS.IS": {"lower": 226, "upper": 229, "signal": "BEKLE", "confidence": 50},
-    "FROTO.IS": {"lower": 114, "upper": 116, "signal": "BEKLE", "confidence": 50},
+    "ASELS.IS": {"lower": 284, "upper": 286, "signal": "BEKLE", "last_sent": None},
+    "TUPRS.IS": {"lower": 226, "upper": 229, "signal": "BEKLE", "last_sent": None},
+    "FROTO.IS": {"lower": 114, "upper": 116, "signal": "BEKLE", "last_sent": None},
 }
 
 prices = {}
@@ -40,24 +40,6 @@ def send_telegram(msg):
         pass
 
 
-# ================= PRICE LOOP =================
-def price_loop():
-    global prices, last_update
-    while True:
-        for symbol, ticker in tickers.items():
-            try:
-                hist = ticker.history(period="1d", interval="1m")
-                if not hist.empty:
-                    price = round(float(hist["Close"].iloc[-1]), 2)
-                    prices[symbol] = price
-            except:
-                pass
-
-        last_update = datetime.now().strftime("%H:%M:%S")
-        evaluate_signals()
-        time.sleep(REFRESH_SECONDS)
-
-
 # ================= SIGNAL ENGINE =================
 def evaluate_signals():
     for s, cfg in WATCHLIST.items():
@@ -66,29 +48,49 @@ def evaluate_signals():
             continue
 
         lower, upper = cfg["lower"], cfg["upper"]
+        new_signal = "BEKLE"
 
         if price <= lower:
-            cfg["signal"] = "AL"
-            cfg["confidence"] = 70
-            send_telegram(f"🟢 AL SİNYALİ\n{s}\nFiyat: {price}")
-
+            new_signal = "AL"
         elif price >= upper:
-            cfg["signal"] = "SAT"
-            cfg["confidence"] = 70
-            send_telegram(f"🔴 SAT SİNYALİ\n{s}\nFiyat: {price}")
+            new_signal = "SAT"
 
-        else:
-            cfg["signal"] = "BEKLE"
-            cfg["confidence"] = 50
+        # 🔴 KRİTİK KONTROL: sadece değişince gönder
+        if new_signal != cfg["last_sent"]:
+            if new_signal == "AL":
+                send_telegram(f"🟢 AL SİNYALİ\n{s}\nFiyat: {price}")
+            elif new_signal == "SAT":
+                send_telegram(f"🔴 SAT SİNYALİ\n{s}\nFiyat: {price}")
+
+            cfg["last_sent"] = new_signal
+
+        cfg["signal"] = new_signal
+
+
+# ================= PRICE LOOP =================
+def price_loop():
+    global last_update
+    while True:
+        for symbol, ticker in tickers.items():
+            try:
+                hist = ticker.history(period="1d", interval="1m")
+                if not hist.empty:
+                    prices[symbol] = round(float(hist["Close"].iloc[-1]), 2)
+            except:
+                pass
+
+        last_update = datetime.now().strftime("%H:%M:%S")
+        evaluate_signals()
+        time.sleep(REFRESH_SECONDS)
 
 
 # ================= API =================
-@app.route("/api/data")
+@app.route("/api/data", methods=["GET", "POST"])
 def api_data():
     rows = []
     for s, cfg in WATCHLIST.items():
         price = prices.get(s)
-        lot = int(ACCOUNT_RISK_TL / abs(cfg["upper"] - cfg["lower"])) if cfg["signal"] != "BEKLE" else 0
+        lot = int(ACCOUNT_RISK_TL / max(abs(cfg["upper"] - cfg["lower"]), 0.01)) if cfg["signal"] != "BEKLE" else 0
 
         rows.append({
             "symbol": s,
@@ -96,7 +98,6 @@ def api_data():
             "lower": cfg["lower"],
             "upper": cfg["upper"],
             "signal": cfg["signal"],
-            "confidence": cfg["confidence"],
             "lot": lot,
             "risk": ACCOUNT_RISK_TL if lot > 0 else 0
         })
@@ -108,18 +109,17 @@ def api_data():
 
 
 # ================= UI =================
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
     html = """
     <h2>BIST Profesyonel Trading Sistemi</h2>
-    <p>Son güncelleme: <span id="time">-</span></p>
+    <p>Son güncelleme: <b id="time">-</b></p>
+
     <table border="1" cellpadding="6">
-      <thead>
-        <tr>
-          <th>Hisse</th><th>Fiyat</th><th>Alt</th><th>Üst</th>
-          <th>Sinyal</th><th>Confidence</th><th>Lot</th><th>Risk</th>
-        </tr>
-      </thead>
+      <tr>
+        <th>Hisse</th><th>Fiyat</th><th>Alt</th><th>Üst</th>
+        <th>Sinyal</th><th>Lot</th><th>Risk</th>
+      </tr>
       <tbody id="body"></tbody>
     </table>
 
@@ -139,7 +139,6 @@ def home():
             <td>${x.lower}</td>
             <td>${x.upper}</td>
             <td>${x.signal}</td>
-            <td>%${x.confidence}</td>
             <td>${x.lot}</td>
             <td>${x.risk}</td>
           </tr>`;
