@@ -4,228 +4,244 @@ import threading
 import requests
 import yfinance as yf
 from flask import Flask, request, render_template_string, jsonify
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
+# ---------------- APP ----------------
 app = Flask(__name__)
 
-# ================== AYARLAR ==================
 TOKEN = os.environ.get("TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 
+# ---------------- AYARLAR ----------------
 ACCOUNT_SIZE = 150000
 RISK_PERCENT = 2
+REFRESH_SECONDS = 30  # fiyat yenileme
 
-TR_TZ = timezone(timedelta(hours=3))
-
+# ---------------- HİSSELER ----------------
 WATCHLIST = {
-    "ASELS.IS": {"lower": 284, "upper": 286, "alerted": None},
-    "TUPRS.IS": {"lower": 226, "upper": 229, "alerted": None},
-    "FROTO.IS": {"lower": 114, "upper": 116, "alerted": None},
+    "ASELS.IS": {"lower": 290, "upper": 310, "alerted": None},
+    "TUPRS.IS": {"lower": 140, "upper": 170, "alerted": None},
+    "FROTO.IS": {"lower": 850, "upper": 900, "alerted": None},
 }
 
 TICKERS = {s: yf.Ticker(s) for s in WATCHLIST}
 
-LATEST = {
-    "prices": {},
-    "ts": None
-}
 
-# ================== MARKET ==================
+# ---------------- MARKET SAATİ ----------------
 def market_open():
-    now = datetime.now(TR_TZ)
+    now = datetime.now()
     if now.weekday() >= 5:
         return False
     return 9 <= now.hour < 18
 
-# ================== TELEGRAM ==================
-def send(msg):
+
+# ---------------- TELEGRAM ----------------
+def send_telegram(message):
     if not TOKEN or not CHAT_ID:
         return
     try:
         requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": msg},
-            timeout=5
+            json={"chat_id": CHAT_ID, "text": message},
+            timeout=5,
         )
     except Exception:
         pass
 
-# ================== FİYAT ÇEKME (ARKA PLAN) ==================
-def fetch_loop():
-    while True:
-        prices = {}
-        for symbol in WATCHLIST:
-            try:
-                df = yf.download(
-                    symbol,
-                    period="1d",
-                    interval="1m",
-                    progress=False,
-                    threads=False,
-                )
-                if df is not None and not df.empty:
-                    prices[symbol] = round(float(df["Close"].iloc[-1]), 2)
-                else:
-                    prices[symbol] = None
-            except Exception:
+
+# ---------------- FİYAT ----------------
+def get_prices():
+    prices = {}
+    for symbol in WATCHLIST:
+        try:
+            hist = TICKERS[symbol].history(period="1d", interval="1m")
+            if not hist.empty:
+                prices[symbol] = round(float(hist["Close"].iloc[-1]), 2)
+            else:
                 prices[symbol] = None
+        except Exception:
+            prices[symbol] = None
+    return prices
 
-        LATEST["prices"] = prices
-        LATEST["ts"] = datetime.now(TR_TZ).strftime("%H:%M:%S")
-        time.sleep(7)
 
-threading.Thread(target=fetch_loop, daemon=True).start()
-
-# ================== SİNYAL ==================
-def signal(price, low, high):
+# ---------------- SİNYAL ----------------
+def generate_signal(price, lower, upper):
     if price is None:
         return "VERİ YOK"
-    if price <= low:
+    if price <= lower:
         return "AL"
-    if price >= high:
+    if price >= upper:
         return "SAT"
     return "BEKLE"
 
-# ================== TELEGRAM MONITOR ==================
-def monitor_loop():
-    while True:
-        if not market_open():
-            time.sleep(60)
-            continue
 
-        for s, data in WATCHLIST.items():
-            price = LATEST["prices"].get(s)
-            if price is None:
+# ---------------- TELEGRAM MONITOR ----------------
+def price_monitor():
+    while True:
+        try:
+            if not market_open():
+                time.sleep(60)
                 continue
 
-            sig = signal(price, data["lower"], data["upper"])
+            prices = get_prices()
 
-            if sig == "AL" and data["alerted"] != "AL":
-                send(f"🟢 AL SİNYALİ\n{s}\nFiyat: {price}")
-                data["alerted"] = "AL"
+            for symbol, cfg in WATCHLIST.items():
+                price = prices.get(symbol)
+                if price is None:
+                    continue
 
-            elif sig == "SAT" and data["alerted"] != "SAT":
-                send(f"🔴 SAT SİNYALİ\n{s}\nFiyat: {price}")
-                data["alerted"] = "SAT"
+                signal = generate_signal(price, cfg["lower"], cfg["upper"])
 
-            elif sig == "BEKLE":
-                data["alerted"] = None
+                if signal == "AL" and cfg["alerted"] != "AL":
+                    send_telegram(f"🟢 AL SİNYALİ\n{symbol}\nFiyat: {price}")
+                    cfg["alerted"] = "AL"
 
-        time.sleep(10)
+                elif signal == "SAT" and cfg["alerted"] != "SAT":
+                    send_telegram(f"🔴 SAT SİNYALİ\n{symbol}\nFiyat: {price}")
+                    cfg["alerted"] = "SAT"
 
-threading.Thread(target=monitor_loop, daemon=True).start()
+                elif signal == "BEKLE":
+                    cfg["alerted"] = None
 
-# ================== API ==================
+            time.sleep(REFRESH_SECONDS)
+
+        except Exception:
+            time.sleep(10)
+
+
+# ---------------- API ----------------
 @app.route("/api/data")
 def api_data():
-    prices = LATEST["prices"]
-    rows = []
-
-    for s, cfg in WATCHLIST.items():
-        p = prices.get(s)
-        sig = signal(p, cfg["lower"], cfg["upper"])
-
-        lot = 0
-        risk = 0
-        if sig in ("AL", "SAT") and p:
-            risk = ACCOUNT_SIZE * (RISK_PERCENT / 100)
-            lot = int(risk / abs(cfg["upper"] - cfg["lower"]))
-
-        rows.append({
-            "symbol": s,
-            "price": p,
-            "lower": cfg["lower"],
-            "upper": cfg["upper"],
-            "signal": sig,
-            "lot": lot,
-            "risk": round(risk, 2),
-        })
+    prices = get_prices()
+    signals = {
+        s: generate_signal(
+            prices.get(s),
+            WATCHLIST[s]["lower"],
+            WATCHLIST[s]["upper"],
+        )
+        for s in WATCHLIST
+    }
 
     return jsonify({
-        "rows": rows,
-        "ts": LATEST["ts"]
+        "prices": prices,
+        "watchlist": WATCHLIST,
+        "signals": signals
     })
 
-# ================== PANEL ==================
+
+# ---------------- WEB PANEL ----------------
 @app.route("/", methods=["GET", "POST"])
 def home():
     if request.method == "POST":
-        s = request.form["symbol"]
-        WATCHLIST[s]["lower"] = float(request.form["lower"].replace(",", "."))
-        WATCHLIST[s]["upper"] = float(request.form["upper"].replace(",", "."))
-        WATCHLIST[s]["alerted"] = None
+        symbol = request.form["symbol"]
+
+        # TR format güvenli dönüşüm
+        lower = float(request.form["lower"].replace(",", "."))
+        upper = float(request.form["upper"].replace(",", "."))
+
+        WATCHLIST[symbol]["lower"] = lower
+        WATCHLIST[symbol]["upper"] = upper
+        WATCHLIST[symbol]["alerted"] = None
 
     html = """
     <html>
     <head>
-    <title>BIST Profesyonel Trading Sistemi</title>
-    <style>
-    body { background:#0b0b0b; color:white; font-family:Arial; padding:30px; }
-    table { width:100%; border-collapse:collapse; }
-    th, td { padding:10px; border-bottom:1px solid #333; text-align:center; }
-    th { background:#1c1c1c; }
-    tr.al { background:#123b25; }
-    tr.sat { background:#4b1616; }
-    .btn { padding:8px 16px; background:#0a84ff; border:none; color:white; }
-    input, select { padding:6px; }
-    </style>
+        <title>BIST Alarm Paneli</title>
+        <style>
+            body { background:#0f1117; color:#e6e6e6; font-family:Arial; padding:40px; }
+            table { width:100%; border-collapse:collapse; margin-bottom:30px; }
+            th, td { padding:12px; border-bottom:1px solid #2a2d36; text-align:center; }
+            th { background:#161a23; }
+            .badge { padding:6px 14px; border-radius:12px; font-weight:bold; }
+            .buy { background:#103b2f; color:#7dffb3; }
+            .sell { background:#3b1010; color:#ff9a9a; }
+            .wait { background:#2f2f2f; color:#ddd; }
+            input, select, button { padding:8px; margin:5px; }
+            button { background:#2563eb; color:white; border:none; cursor:pointer; }
+        </style>
     </head>
     <body>
 
-    <h2>📊 BIST Profesyonel Trading Sistemi</h2>
-    <div>Son güncelleme: <span id="ts">-</span></div>
+    <h2>📊 Manuel Alt / Üst Alarm Paneli</h2>
 
     <table>
-    <thead>
-    <tr>
-        <th>Hisse</th><th>Fiyat</th><th>Alt</th><th>Üst</th>
-        <th>Sinyal</th><th>Lot</th><th>Risk</th>
-    </tr>
-    </thead>
-    <tbody id="body"></tbody>
+        <thead>
+            <tr>
+                <th>Hisse</th>
+                <th>Fiyat (gecikmeli)</th>
+                <th>Alt</th>
+                <th>Üst</th>
+                <th>Sinyal</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for s in watchlist %}
+            <tr>
+                <td>{{s}}</td>
+                <td id="price-{{s}}">-</td>
+                <td>{{watchlist[s]["lower"]}}</td>
+                <td>{{watchlist[s]["upper"]}}</td>
+                <td id="signal-{{s}}">-</td>
+            </tr>
+        {% endfor %}
+        </tbody>
     </table>
 
     <h3>Limit Güncelle</h3>
     <form method="post">
         <select name="symbol">
-        {% for s in watchlist %}
-            <option value="{{s}}">{{s}}</option>
-        {% endfor %}
+            {% for s in watchlist %}
+                <option value="{{s}}">{{s}}</option>
+            {% endfor %}
         </select>
-        <input name="lower" placeholder="Alt">
-        <input name="upper" placeholder="Üst">
-        <button class="btn">Güncelle</button>
+        <input name="lower" placeholder="Alt (294,25 olabilir)">
+        <input name="upper" placeholder="Üst (310)">
+        <button type="submit">Güncelle</button>
     </form>
 
     <script>
-    async function refresh(){
+    async function refresh() {
         const r = await fetch("/api/data");
         const d = await r.json();
-        document.getElementById("ts").innerText = d.ts;
-        let html = "";
-        d.rows.forEach(x=>{
-            let cls = x.signal === "AL" ? "al" : x.signal === "SAT" ? "sat" : "";
-            html += `<tr class="${cls}">
-                <td>${x.symbol}</td>
-                <td>${x.price ?? "-"}</td>
-                <td>${x.lower}</td>
-                <td>${x.upper}</td>
-                <td>${x.signal}</td>
-                <td>${x.lot}</td>
-                <td>${x.risk}</td>
-            </tr>`;
-        });
-        document.getElementById("body").innerHTML = html;
+
+        for (const s in d.prices) {
+            document.getElementById("price-" + s).innerText =
+                d.prices[s] === null ? "Veri yok" : d.prices[s];
+
+            const cell = document.getElementById("signal-" + s);
+            cell.innerHTML = "";
+
+            const badge = document.createElement("span");
+            badge.classList.add("badge");
+
+            if (d.signals[s] === "AL") {
+                badge.classList.add("buy");
+                badge.innerText = "AL";
+            } else if (d.signals[s] === "SAT") {
+                badge.classList.add("sell");
+                badge.innerText = "SAT";
+            } else {
+                badge.classList.add("wait");
+                badge.innerText = "BEKLE";
+            }
+
+            cell.appendChild(badge);
+        }
     }
-    setInterval(refresh, 5000);
+
+    setInterval(refresh, 15000);
     refresh();
     </script>
 
     </body>
     </html>
     """
+
     return render_template_string(html, watchlist=WATCHLIST)
 
-# ================== START ==================
+
+# ---------------- START ----------------
+threading.Thread(target=price_monitor, daemon=True).start()
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
