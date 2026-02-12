@@ -168,6 +168,7 @@ def worker():
 # FLASK
 # -------------------------
 app = Flask(__name__)
+start_background()
 
 @app.route("/")
 def home():
@@ -188,11 +189,5 @@ def manual_refresh():
     refresh()
     return {"ok": True}
 
-if __name__ == "__main__":
-    try:
-        refresh_once()
-    except Exception as e:
-        print("INITIAL REFRESH ERROR:", e)
 
-    start_background()
    
