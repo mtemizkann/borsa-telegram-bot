@@ -23,11 +23,11 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "tv_super_secret_2026").strip(
 
 WATCHLIST = ["FROTO", "TUPRS", "ASELS", "MGROS"]
 
-SYMBOL_MAP = {
-    "FROTO": "FROTO",
-    "TUPRS": "TUPRS",
-    "ASELS": "ASELS",
-    "MGROS": "MGROS",
+SYMBOL_MAP: Dict[str, str] = {
+    "FROTO": "FROTO.IS",
+    "TUPRS": "TUPRS.IS",
+    "ASELS": "ASELS.IS",
+    "MGROS": "MGROS.IS",
 }
 
 BUDGETS_TRY = {
