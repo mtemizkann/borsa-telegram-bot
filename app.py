@@ -16,7 +16,7 @@ Kurulum:
 pip install flask requests pandas
 
 Çalıştır:
-export TWELVEDATA_API_KEY="..."
+export TWELVEDATA_API_KEY="55f5c55b141b4ffc90f614ce796829b8"
 export TELEGRAM_TOKEN="8023661442:AAGYLLB-PDEXj78ofTvvrhFt1Lx2QNp2tv0
 "
 export TELEGRAM_CHAT_ID="1090532341"
