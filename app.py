@@ -180,6 +180,10 @@ def manual_refresh():
     return {"ok": True}
 
 if __name__ == "__main__":
-    refresh()
-    threading.Thread(target=worker, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    try:
+        refresh_once()
+    except Exception as e:
+        print("INITIAL REFRESH ERROR:", e)
+
+    start_background()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
