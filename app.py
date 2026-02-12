@@ -17,10 +17,12 @@ pip install flask requests pandas
 
 Çalıştır:
 export TWELVEDATA_API_KEY="..."
-export TELEGRAM_TOKEN="..."
-export TELEGRAM_CHAT_ID="..."
+export TELEGRAM_TOKEN="8023661442:AAGYLLB-PDEXj78ofTvvrhFt1Lx2QNp2tv0
+"
+export TELEGRAM_CHAT_ID="1090532341"
 export CHECK_INTERVAL_SEC="180"   # 3 dk
-export WEBHOOK_SECRET="..."       # opsiyonel
+export WEBHOOK_SECRET="tv_super_secret_2026
+"       # opsiyonel
 python app.py
 """
 
