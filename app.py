@@ -92,7 +92,7 @@ def fetch_ohlc(symbol: str):
 # -------------------------
 def send_telegram(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials missing, skipping notification")
+        print("⚠️ Telegram credentials missing")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -116,6 +116,7 @@ class SignalResult:
 
 STATE = {}
 LOCK = threading.Lock()
+WORKER_STARTED = False
 
 def analyze(symbol: str):
     df = fetch_ohlc(SYMBOL_MAP.get(symbol, symbol))
@@ -130,7 +131,6 @@ def analyze(symbol: str):
     ema200 = float(ema(close, 200).iloc[-1])
     rsi14 = float(rsi(close, 14).iloc[-1])
 
-    # NaN kontrolü
     if pd.isna(price) or pd.isna(ema50) or pd.isna(ema200) or pd.isna(rsi14):
         raise RuntimeError("Indicator calculation failed (NaN)")
 
@@ -145,15 +145,14 @@ def analyze(symbol: str):
     rr_ok = risk > 0 and (target - price) / risk >= 2
 
     signal = "AL" if all([trend_ok, rsi_ok, support_ok, rr_ok]) else "BEKLE"
-
-    note = f"RSI:{rsi14:.1f} | Trend:{'OK' if trend_ok else 'NO'}"
+    note = f"RSI:{rsi14:.1f} | Trend:{'✓' if trend_ok else '✗'}"
 
     return SignalResult(symbol, price, signal, note)
 
 def refresh():
     for s in WATCHLIST:
         try:
-            print(f"Fetching {s}...")
+            print(f"📊 Fetching {s}...")
             res = analyze(s)
             print(f"✓ {s}: {res.signal} @ {res.price:.2f}")
 
@@ -169,9 +168,30 @@ def refresh():
                 STATE[s] = SignalResult(s, 0, "HATA", str(e))
 
 def worker():
+    """Background thread - gunicorn ile çalışır"""
+    print(f"🔄 Worker started (interval: {CHECK_INTERVAL_SEC}s)")
     while True:
         refresh()
         time.sleep(CHECK_INTERVAL_SEC)
+
+def start_background():
+    """Thread'i sadece bir kez başlat"""
+    global WORKER_STARTED
+    if WORKER_STARTED:
+        return
+    
+    WORKER_STARTED = True
+    print("🚀 Starting background worker...")
+    
+    # İlk veri çekimi
+    try:
+        refresh()
+    except Exception as e:
+        print(f"Initial fetch error: {e}")
+    
+    # Arka plan thread
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
 
 # -------------------------
 # FLASK
@@ -185,24 +205,48 @@ def home():
     
     html = """
     <html>
-    <head><title>Signal Panel</title></head>
-    <body style="font-family: Arial; padding: 20px;">
-        <h2>📊 Signal Panel</h2>
-        <table border="1" cellpadding="10">
+    <head>
+        <meta charset="utf-8">
+        <title>Signal Panel</title>
+        <style>
+            body { font-family: Arial; padding: 20px; background: #f5f5f5; }
+            h2 { color: #333; }
+            table { border-collapse: collapse; width: 100%; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+            th { background: #4CAF50; color: white; }
+            .AL { background: #e8f5e9; }
+            .BEKLE { background: #fff9c4; }
+            .HATA { background: #ffebee; }
+        </style>
+    </head>
+    <body>
+        <h2>📊 Smart Signal Panel</h2>
+        <p>Interval: <b>{{ interval }}s</b> | Watchlist: <b>{{ watchlist }}</b></p>
+        <table>
             <tr><th>Sembol</th><th>Fiyat</th><th>Sinyal</th><th>Not</th></tr>
             {% for s, d in data.items() %}
-            <tr style="background: {{ '#eaffea' if d.signal == 'AL' else '#fffbe6' if d.signal == 'BEKLE' else '#ffecec' }}">
+            <tr class="{{ d.signal }}">
                 <td><b>{{ s }}</b></td>
-                <td>{{ "%.2f"|format(d.price) }}</td>
+                <td>{{ "%.2f"|format(d.price) if d.price > 0 else "-" }}</td>
                 <td><b>{{ d.signal }}</b></td>
                 <td>{{ d.note }}</td>
             </tr>
             {% endfor %}
         </table>
+        <p style="margin-top: 20px;">
+            <a href="/api/state">JSON API</a> | 
+            <a href="/api/refresh?key={{ secret }}">Manuel Refresh</a>
+        </p>
     </body>
     </html>
     """
-    return render_template_string(html, data=data)
+    return render_template_string(
+        html, 
+        data=data, 
+        interval=CHECK_INTERVAL_SEC,
+        watchlist=", ".join(WATCHLIST),
+        secret=WEBHOOK_SECRET
+    )
 
 @app.route("/api/state")
 def state():
@@ -218,22 +262,12 @@ def manual_refresh():
     return {"ok": True}
 
 # -------------------------
-# MAIN
+# GUNICORN UYUMLU BAŞLATMA
 # -------------------------
+# Gunicorn modülü import ettiğinde otomatik çalışır
+start_background()
+
+# Yerel test için
 if __name__ == "__main__":
-    # İlk veri çekimi
-    print("Initial data fetch...")
-    try:
-        refresh()
-    except Exception as e:
-        print(f"Initial fetch error: {e}")
-    
-    # Arka plan thread başlat
-    print(f"Starting background worker (interval: {CHECK_INTERVAL_SEC}s)")
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
-    
-    # Flask başlat
     port = int(os.environ.get("PORT", "8080"))
-    print(f"Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
