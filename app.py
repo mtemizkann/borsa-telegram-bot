@@ -186,4 +186,4 @@ if __name__ == "__main__":
         print("INITIAL REFRESH ERROR:", e)
 
     start_background()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+   
