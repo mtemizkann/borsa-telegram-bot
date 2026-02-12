@@ -141,12 +141,21 @@ def analyze(symbol: str):
 def refresh():
     for s in WATCHLIST:
         try:
+            print("FETCHING:", s)
+
             res = analyze(s)
+
+            print("OK:", s, "signal:", res.signal)
+
             with LOCK:
                 STATE[s] = res
+
             if res.signal == "AL":
                 send_telegram(f"{s} AL sinyali\nFiyat: {res.price}")
+
         except Exception as e:
+            print("ERROR FOR", s, ":", str(e))
+
             with LOCK:
                 STATE[s] = SignalResult(s, 0, "HATA", str(e))
 
