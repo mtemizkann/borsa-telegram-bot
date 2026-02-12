@@ -73,28 +73,36 @@ def fetch_ohlc(symbol: str):
         raise RuntimeError(data.get("message"))
 
     values = list(reversed(data.get("values", [])))
+    if not values:
+        raise RuntimeError("No data returned")
+    
     df = pd.DataFrame(values)
 
     for c in ["open", "high", "low", "close", "volume"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
     df["datetime"] = pd.to_datetime(df["datetime"])
     df.set_index("datetime", inplace=True)
 
-    return df.dropna()
+    return df.dropna(subset=["close", "low"])
 
 # -------------------------
 # TELEGRAM
 # -------------------------
 def send_telegram(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram credentials missing, skipping notification")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text
-    }, timeout=10)
+    try:
+        requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text
+        }, timeout=10)
+    except Exception as e:
+        print(f"Telegram error: {e}")
 
 # -------------------------
 # ENGINE
@@ -122,6 +130,10 @@ def analyze(symbol: str):
     ema200 = float(ema(close, 200).iloc[-1])
     rsi14 = float(rsi(close, 14).iloc[-1])
 
+    # NaN kontrolü
+    if pd.isna(price) or pd.isna(ema50) or pd.isna(ema200) or pd.isna(rsi14):
+        raise RuntimeError("Indicator calculation failed (NaN)")
+
     support = float(low.tail(20).min())
     stop = support * 0.98
     risk = price - stop
@@ -134,28 +146,25 @@ def analyze(symbol: str):
 
     signal = "AL" if all([trend_ok, rsi_ok, support_ok, rr_ok]) else "BEKLE"
 
-    note = f"RSI:{rsi14:.1f}"
+    note = f"RSI:{rsi14:.1f} | Trend:{'OK' if trend_ok else 'NO'}"
 
     return SignalResult(symbol, price, signal, note)
 
 def refresh():
     for s in WATCHLIST:
         try:
-            print("FETCHING:", s)
-
+            print(f"Fetching {s}...")
             res = analyze(s)
-
-            print("OK:", s, "signal:", res.signal)
+            print(f"✓ {s}: {res.signal} @ {res.price:.2f}")
 
             with LOCK:
                 STATE[s] = res
 
             if res.signal == "AL":
-                send_telegram(f"{s} AL sinyali\nFiyat: {res.price}")
+                send_telegram(f"📌 {s} AL SİNYALİ\nFiyat: {res.price:.2f}\n{res.note}")
 
         except Exception as e:
-            print("ERROR FOR", s, ":", str(e))
-
+            print(f"✗ {s} ERROR: {e}")
             with LOCK:
                 STATE[s] = SignalResult(s, 0, "HATA", str(e))
 
@@ -168,13 +177,32 @@ def worker():
 # FLASK
 # -------------------------
 app = Flask(__name__)
-start_background()
 
 @app.route("/")
 def home():
     with LOCK:
         data = {k: asdict(v) for k, v in STATE.items()}
-    return jsonify(data)
+    
+    html = """
+    <html>
+    <head><title>Signal Panel</title></head>
+    <body style="font-family: Arial; padding: 20px;">
+        <h2>📊 Signal Panel</h2>
+        <table border="1" cellpadding="10">
+            <tr><th>Sembol</th><th>Fiyat</th><th>Sinyal</th><th>Not</th></tr>
+            {% for s, d in data.items() %}
+            <tr style="background: {{ '#eaffea' if d.signal == 'AL' else '#fffbe6' if d.signal == 'BEKLE' else '#ffecec' }}">
+                <td><b>{{ s }}</b></td>
+                <td>{{ "%.2f"|format(d.price) }}</td>
+                <td><b>{{ d.signal }}</b></td>
+                <td>{{ d.note }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </body>
+    </html>
+    """
+    return render_template_string(html, data=data)
 
 @app.route("/api/state")
 def state():
@@ -189,5 +217,23 @@ def manual_refresh():
     refresh()
     return {"ok": True}
 
-
-   
+# -------------------------
+# MAIN
+# -------------------------
+if __name__ == "__main__":
+    # İlk veri çekimi
+    print("Initial data fetch...")
+    try:
+        refresh()
+    except Exception as e:
+        print(f"Initial fetch error: {e}")
+    
+    # Arka plan thread başlat
+    print(f"Starting background worker (interval: {CHECK_INTERVAL_SEC}s)")
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    
+    # Flask başlat
+    port = int(os.environ.get("PORT", "8080"))
+    print(f"Starting Flask on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
