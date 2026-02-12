@@ -15,11 +15,11 @@ from flask import Flask, jsonify, request, render_template_string
 # -------------------------
 # ENV
 # -------------------------
-TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "").strip()
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "55f5c55b141b4ffc90f614ce796829b8").strip()
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "1090532341").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1090532341").strip()
 CHECK_INTERVAL_SEC = int(os.environ.get("CHECK_INTERVAL_SEC", "180"))
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "tv_super_secret_2026").strip()
 
 WATCHLIST = ["FROTO", "TUPRS", "ASELS", "MGROS"]
 
