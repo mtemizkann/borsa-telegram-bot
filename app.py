@@ -501,8 +501,8 @@ if __name__ == "__main__":
     # İlk state oluştur
     try:
         refresh_once()
-    except Exception:
-        pass
+    except Exception as e:
+    print("INITIAL REFRESH ERROR:", e)
 
     start_background()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
