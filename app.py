@@ -12,7 +12,7 @@ app = Flask(__name__)
 # ==========================
 # ENV
 # ==========================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8023661442:AAGYLLB-PDEXj78ofTvvrhFt1Lx2QNp2tv0").strip()
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8023661442:AAHVsU9FBN35FMaW787m3EtIOIjpTtnZfhc").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1090532341").strip()
 CHECK_INTERVAL_SEC = int(os.environ.get("CHECK_INTERVAL_SEC", "900"))  # 15 dk
 
