@@ -207,188 +207,233 @@ def home():
     market_status = "AÇIK" if market_open() else "KAPALI"
 
     html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <title>BIST Enterprise Pro</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-    body{
-        background: radial-gradient(circle at top left,#0f172a,#020617);
-        color:white;
-        font-family:Segoe UI;
-        padding:40px;
-    }
-    h1{margin-bottom:5px}
-    .status{
-        padding:6px 14px;
-        border-radius:20px;
-        background:#1e293b;
-        display:inline-block;
-        margin-bottom:30px;
-        font-size:14px;
-    }
-    table{
-        width:100%;
-        border-collapse:collapse;
-        margin-bottom:40px;
-    }
-    th,td{
-        padding:14px;
-        border-bottom:1px solid rgba(255,255,255,0.05);
-        text-align:center;
-    }
-    th{
-        color:#94a3b8;
-        font-weight:600;
-    }
-    tr:hover{
-        background:rgba(255,255,255,0.03);
-    }
-    .badge{
-        padding:6px 14px;
-        border-radius:20px;
-        font-weight:600;
-        font-size:14px;
-    }
-    .buy{background:#064e3b;color:#6ee7b7}
-    .sell{background:#7f1d1d;color:#fca5a5}
-    .wait{background:#1e293b;color:#cbd5e1}
-    .nov{background:#334155;color:#cbd5e1}
-    .confidence-bar{
-        height:6px;
-        background:#1e293b;
-        border-radius:4px;
-        overflow:hidden;
-    }
-    .confidence-fill{
-        height:6px;
-        background:#3b82f6;
-    }
-    form{
-        display:flex;
-        gap:10px;
-        margin-top:20px;
-    }
-    select,input{
-        padding:8px;
-        background:#1e293b;
-        color:white;
-        border:none;
-        border-radius:6px;
-    }
-    button{
-        background:#2563eb;
-        color:white;
-        border:none;
-        padding:8px 18px;
-        border-radius:6px;
-        cursor:pointer;
-    }
-    </style>
-    </head>
-    <body>
+<html>
+<head>
+<title>BIST Professional Alarm Panel</title>
 
-    <h1>📊 BIST Enterprise Swing Terminal</h1>
-    <div class="status">Market: {{market_status}}</div>
+<style>
+body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto;
+    background: radial-gradient(circle at 20% 20%, #0d1b2a, #000814 70%);
+    color:white;
+    padding:50px;
+}
 
-    <table>
-    <thead>
-    <tr>
-        <th>Hisse</th>
-        <th>Fiyat</th>
-        <th>Alt</th>
-        <th>Üst</th>
-        <th>Band %</th>
-        <th>Sinyal</th>
-        <th>Confidence</th>
-    </tr>
-    </thead>
-    <tbody>
-    {% for s,d in watchlist.items() %}
-    <tr>
-        <td>{{s}}</td>
-        <td id="price-{{s}}">-</td>
-        <td>{{d["lower"]}}</td>
-        <td>{{d["upper"]}}</td>
-        <td id="distance-{{s}}">-</td>
-        <td id="signal-{{s}}">-</td>
-        <td>
-            <div class="confidence-bar">
-                <div class="confidence-fill" id="conf-{{s}}" style="width:0%"></div>
-            </div>
-        </td>
-    </tr>
-    {% endfor %}
-    </tbody>
-    </table>
+.container{
+    max-width:1200px;
+    margin:auto;
+}
 
-    <h3>Limit Güncelle</h3>
-    <form method="post">
-        <select name="symbol">
-        {% for s in watchlist.keys() %}
-            <option value="{{s}}">{{s}}</option>
-        {% endfor %}
-        </select>
-        <input name="lower" placeholder="Alt">
-        <input name="upper" placeholder="Üst">
-        <button>Güncelle</button>
-    </form>
+.header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:30px;
+}
 
-    <script>
-   async function refresh(){
+.badge-online{
+    background:#0f5132;
+    padding:6px 14px;
+    border-radius:20px;
+    font-size:13px;
+    opacity:0.9;
+}
+
+.card{
+    background:rgba(255,255,255,0.05);
+    backdrop-filter: blur(18px);
+    border-radius:18px;
+    padding:30px;
+    box-shadow:0 0 40px rgba(0,0,0,0.5);
+    margin-bottom:30px;
+}
+
+table{
+    width:100%;
+    border-collapse:collapse;
+}
+
+th{
+    text-align:center;
+    opacity:0.6;
+    font-weight:500;
+    padding:18px 10px;
+}
+
+td{
+    text-align:center;
+    padding:20px 10px;
+    font-size:18px;
+}
+
+tr{
+    transition:0.25s;
+}
+
+tr:hover{
+    background:rgba(255,255,255,0.03);
+}
+
+tr.sell{
+    background:rgba(132,32,41,0.18);
+}
+
+tr.buy{
+    background:rgba(15,81,50,0.18);
+}
+
+.signal{
+    padding:8px 18px;
+    border-radius:30px;
+    font-weight:600;
+    font-size:14px;
+}
+
+.wait{background:#343a40;}
+.sell-badge{background:#842029;}
+.buy-badge{background:#0f5132;}
+
+.form-row{
+    display:flex;
+    gap:15px;
+    align-items:center;
+}
+
+input,select{
+    padding:10px 15px;
+    border-radius:10px;
+    border:none;
+    background:rgba(255,255,255,0.1);
+    color:white;
+}
+
+button{
+    padding:10px 20px;
+    border:none;
+    border-radius:10px;
+    background:#0a84ff;
+    color:white;
+    font-weight:600;
+    cursor:pointer;
+    transition:0.2s;
+}
+
+button:hover{
+    opacity:0.85;
+}
+
+.system{
+    opacity:0.7;
+    font-size:14px;
+    line-height:1.6;
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+
+<div class="header">
+<h1>📊 BIST Professional Alarm Panel</h1>
+<div class="badge-online">Online</div>
+</div>
+
+<div class="card">
+<table>
+<thead>
+<tr>
+<th>Hisse</th>
+<th>Anlık Fiyat</th>
+<th>Alt Limit</th>
+<th>Üst Limit</th>
+<th>Sinyal</th>
+</tr>
+</thead>
+
+<tbody>
+{% for s in watchlist %}
+<tr id="row-{{s}}">
+<td>{{s}}</td>
+<td id="price-{{s}}">-</td>
+<td>{{watchlist[s]["lower"]}}</td>
+<td>{{watchlist[s]["upper"]}}</td>
+<td id="signal-{{s}}">-</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+
+<div class="card">
+<h3>Limit Güncelle</h3>
+<form method="post" class="form-row">
+<select name="symbol">
+{% for s in watchlist %}
+<option value="{{s}}">{{s}}</option>
+{% endfor %}
+</select>
+<input name="lower" placeholder="Alt Limit">
+<input name="upper" placeholder="Üst Limit">
+<button type="submit">Güncelle</button>
+</form>
+</div>
+
+<div class="card system">
+• Web yenileme: 15 sn<br>
+• Telegram kontrol: 30 sn<br>
+• Market saatleri: 09:00–18:00 (Hafta içi)
+</div>
+
+</div>
+
+<script>
+async function refresh(){
     const r = await fetch("/api/data");
     const d = await r.json();
 
     for(const s in d.prices){
         const price = d.prices[s];
-        const lower = d.watchlist[s].lower;
-        const upper = d.watchlist[s].upper;
+        const signal = d.signals[s];
 
-        document.getElementById("price-"+s).innerText = price ?? "Yok";
+        document.getElementById("price-"+s).innerText =
+            price===null ? "Veri Yok" : price;
 
-        if(price){
-            let position = ((price - lower) / (upper - lower)) * 100;
-            let breakout = 0;
+        const row = document.getElementById("row-"+s);
+        row.classList.remove("buy","sell");
 
-            if(price < lower){
-                breakout = ((lower - price) / lower) * 100;
-                position = 0;
-            }
-            else if(price > upper){
-                breakout = ((price - upper) / upper) * 100;
-                position = 100;
-            }
+        const cell = document.getElementById("signal-"+s);
+        cell.innerHTML="";
 
-            document.getElementById("distance-"+s).innerText =
-                position.toFixed(1) + "%";
+        let span = document.createElement("span");
+        span.classList.add("signal");
 
-            document.getElementById("conf-"+s).style.width =
-                Math.min(100, Math.max(0, position)) + "%";
+        if(signal==="AL"){
+            span.classList.add("buy-badge");
+            span.innerText="AL";
+            row.classList.add("buy");
+        }
+        else if(signal==="SAT"){
+            span.classList.add("sell-badge");
+            span.innerText="SAT";
+            row.classList.add("sell");
+        }
+        else{
+            span.classList.add("wait");
+            span.innerText="BEKLE";
         }
 
-        const signal = d.signals[s];
-        const cell = document.getElementById("signal-"+s);
-        cell.innerHTML = "";
-        const badge = document.createElement("span");
-        badge.classList.add("badge");
-
-        if(signal==="AL"){badge.classList.add("buy");badge.innerText="AL";}
-        else if(signal==="SAT"){badge.classList.add("sell");badge.innerText="SAT";}
-        else if(signal==="VERİ YOK"){badge.classList.add("nov");badge.innerText="YOK";}
-        else{badge.classList.add("wait");badge.innerText="BEKLE";}
-
-        cell.appendChild(badge);
+        cell.appendChild(span);
     }
 }
 
-    setInterval(refresh,10000);
-    refresh();
-    </script>
+setInterval(refresh,15000);
+refresh();
+</script>
 
-    </body>
-    </html>
-    """
+</body>
+</html>
+"""
 
     return render_template_string(
         html,
