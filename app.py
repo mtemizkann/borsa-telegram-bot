@@ -106,7 +106,6 @@ def analyze_stock(symbol):
 # ==========================
 def swing_monitor():
     print("Swing monitor started")
-    send_telegram("🚀 BIST SWING BOT AKTIF")
 
     while True:
         try:
