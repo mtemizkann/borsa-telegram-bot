@@ -44,6 +44,7 @@ def send_telegram(message):
     except:
         pass
 
+
 # ==========================
 # INDICATORS
 # ==========================
@@ -56,6 +57,7 @@ def rsi(series, period=14):
     loss = (-delta.clip(upper=0)).rolling(period).mean()
     rs = gain / loss.replace(0, pd.NA)
     return 100 - (100 / (1 + rs))
+
 
 # ==========================
 # SWING ENGINE
@@ -78,7 +80,6 @@ def analyze_stock(symbol):
 
         potential = ((recent_high - current_price) / current_price) * 100
 
-        # === STRATEGY CONDITIONS ===
         trend_up = current_price > ema50
         dip_zone = rsi_value < 40
         near_support = current_price <= support_20 * 1.03
@@ -99,54 +100,44 @@ def analyze_stock(symbol):
     except:
         return None
 
+
 # ==========================
 # MONITOR LOOP
 # ==========================
 def swing_monitor():
     print("Swing monitor started")
-    send_telegram("BOT CALISIYOR TEST MESAJI")  # BUNU EKLE
+    send_telegram("🚀 BIST SWING BOT AKTIF")
 
     while True:
         try:
             for symbol, data in WATCHLIST.items():
-    result = analyze_stock(symbol)
 
-    if result:
-        if data["last_signal"] != "BUY":
-
-            message = (
-                f"📈 SWING FIRSATI\n\n"
-                f"Hisse: {result['symbol']}\n"
-                f"Fiyat: {result['price']}\n"
-                f"Destek: {result['support']}\n"
-                f"Hedef: {result['target']}\n"
-                f"Potansiyel: %{result['potential']}\n"
-                f"RSI: {result['rsi']}"
-            )
-
-            send_telegram(message)
-            data["last_signal"] = "BUY"
-
-    else:
-        data["last_signal"] = None
+                result = analyze_stock(symbol)
 
                 if result:
-                    message = (
-                        f"📈 SWING FIRSATI\n\n"
-                        f"Hisse: {result['symbol']}\n"
-                        f"Fiyat: {result['price']}\n"
-                        f"Destek: {result['support']}\n"
-                        f"Hedef: {result['target']}\n"
-                        f"Potansiyel: %{result['potential']}\n"
-                        f"RSI: {result['rsi']}"
-                    )
+                    if data["last_signal"] != "BUY":
 
-                    send_telegram(message)
+                        message = (
+                            f"📈 SWING FIRSATI\n\n"
+                            f"Hisse: {result['symbol']}\n"
+                            f"Fiyat: {result['price']}\n"
+                            f"Destek: {result['support']}\n"
+                            f"Hedef: {result['target']}\n"
+                            f"Potansiyel: %{result['potential']}\n"
+                            f"RSI: {result['rsi']}"
+                        )
+
+                        send_telegram(message)
+                        data["last_signal"] = "BUY"
+
+                else:
+                    data["last_signal"] = None
 
             time.sleep(CHECK_INTERVAL_SEC)
 
         except:
             time.sleep(60)
+
 
 # ==========================
 # API STATUS
@@ -159,14 +150,11 @@ def state():
         "check_interval_sec": CHECK_INTERVAL_SEC
     })
 
+
 # ==========================
 # START (Gunicorn uyumlu)
 # ==========================
+threading.Thread(target=swing_monitor, daemon=True).start()
 
-def start_bot():
-    send_telegram("🚀 BIST SWING BOT AKTIF")
-    threading.Thread(target=swing_monitor, daemon=True).start()
-
-start_bot()
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
