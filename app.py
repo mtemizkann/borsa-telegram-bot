@@ -113,28 +113,29 @@ def swing_monitor():
 
                 result = analyze_stock(symbol)
 
-                if result:
-                    if data["last_signal"] != "BUY":
+                if result and data["last_signal"] != "BUY":
 
-                        message = (
-                            f"📈 SWING FIRSATI\n\n"
-                            f"Hisse: {result['symbol']}\n"
-                            f"Fiyat: {result['price']}\n"
-                            f"Destek: {result['support']}\n"
-                            f"Hedef: {result['target']}\n"
-                            f"Potansiyel: %{result['potential']}\n"
-                            f"RSI: {result['rsi']}"
-                        )
+                    message = (
+                        f"📈 SWING FIRSATI\n\n"
+                        f"Hisse: {result['symbol']}\n"
+                        f"Fiyat: {result['price']}\n"
+                        f"Destek: {result['support']}\n"
+                        f"Hedef: {result['target']}\n"
+                        f"Potansiyel: %{result['potential']}\n"
+                        f"RSI: {result['rsi']}"
+                    )
 
-                        send_telegram(message)
-                        data["last_signal"] = "BUY"
+                    send_telegram(message)
+                    data["last_signal"] = "BUY"
 
-                else:
+                elif not result and data["last_signal"] is not None:
                     data["last_signal"] = None
 
+            print(f"Next check in {CHECK_INTERVAL_SEC} seconds")
             time.sleep(CHECK_INTERVAL_SEC)
 
-        except:
+        except Exception as e:
+            print(f"Monitor error: {e}")
             time.sleep(60)
 
 
