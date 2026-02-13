@@ -204,83 +204,185 @@ def home():
     with _state_lock:
         snapshot = json.loads(json.dumps(WATCHLIST))
 
-    html = """ 
+    market_status = "AÇIK" if market_open() else "KAPALI"
+
+    html = """
     <!DOCTYPE html>
     <html>
     <head>
-    <title>BIST Enterprise Panel</title>
+    <title>BIST Enterprise Pro</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-    body{background:linear-gradient(135deg,#0f172a,#0b1120);color:white;font-family:Segoe UI;padding:40px}
-    h2{margin-bottom:5px}
-    table{width:100%;border-collapse:collapse;margin-bottom:40px}
-    th,td{padding:14px;border-bottom:1px solid rgba(255,255,255,0.08)}
-    th{color:#94a3b8;text-align:left}
-    tr:hover{background:rgba(255,255,255,0.05)}
-    .badge{padding:6px 14px;border-radius:20px;font-weight:600}
+    body{
+        background: radial-gradient(circle at top left,#0f172a,#020617);
+        color:white;
+        font-family:Segoe UI;
+        padding:40px;
+    }
+    h1{margin-bottom:5px}
+    .status{
+        padding:6px 14px;
+        border-radius:20px;
+        background:#1e293b;
+        display:inline-block;
+        margin-bottom:30px;
+        font-size:14px;
+    }
+    table{
+        width:100%;
+        border-collapse:collapse;
+        margin-bottom:40px;
+    }
+    th,td{
+        padding:14px;
+        border-bottom:1px solid rgba(255,255,255,0.05);
+        text-align:center;
+    }
+    th{
+        color:#94a3b8;
+        font-weight:600;
+    }
+    tr:hover{
+        background:rgba(255,255,255,0.03);
+    }
+    .badge{
+        padding:6px 14px;
+        border-radius:20px;
+        font-weight:600;
+        font-size:14px;
+    }
     .buy{background:#064e3b;color:#6ee7b7}
     .sell{background:#7f1d1d;color:#fca5a5}
     .wait{background:#1e293b;color:#cbd5e1}
     .nov{background:#334155;color:#cbd5e1}
-    form{display:flex;gap:10px}
-    select,input{padding:8px;background:#1e293b;color:white;border:none;border-radius:6px}
-    button{background:#3b82f6;color:white;border:none;padding:8px 18px;border-radius:6px}
+    .confidence-bar{
+        height:6px;
+        background:#1e293b;
+        border-radius:4px;
+        overflow:hidden;
+    }
+    .confidence-fill{
+        height:6px;
+        background:#3b82f6;
+    }
+    form{
+        display:flex;
+        gap:10px;
+        margin-top:20px;
+    }
+    select,input{
+        padding:8px;
+        background:#1e293b;
+        color:white;
+        border:none;
+        border-radius:6px;
+    }
+    button{
+        background:#2563eb;
+        color:white;
+        border:none;
+        padding:8px 18px;
+        border-radius:6px;
+        cursor:pointer;
+    }
     </style>
     </head>
     <body>
-    <h2>📊 BIST Enterprise Swing Panel</h2>
+
+    <h1>📊 BIST Enterprise Swing Terminal</h1>
+    <div class="status">Market: {{market_status}}</div>
+
     <table>
-    <thead><tr><th>Hisse</th><th>Fiyat</th><th>Alt</th><th>Üst</th><th>Sinyal</th></tr></thead>
+    <thead>
+    <tr>
+        <th>Hisse</th>
+        <th>Fiyat</th>
+        <th>Alt</th>
+        <th>Üst</th>
+        <th>Band %</th>
+        <th>Sinyal</th>
+        <th>Confidence</th>
+    </tr>
+    </thead>
     <tbody>
     {% for s,d in watchlist.items() %}
     <tr>
-    <td>{{s}}</td>
-    <td id="price-{{s}}">-</td>
-    <td>{{d["lower"]}}</td>
-    <td>{{d["upper"]}}</td>
-    <td id="signal-{{s}}">-</td>
+        <td>{{s}}</td>
+        <td id="price-{{s}}">-</td>
+        <td>{{d["lower"]}}</td>
+        <td>{{d["upper"]}}</td>
+        <td id="distance-{{s}}">-</td>
+        <td id="signal-{{s}}">-</td>
+        <td>
+            <div class="confidence-bar">
+                <div class="confidence-fill" id="conf-{{s}}" style="width:0%"></div>
+            </div>
+        </td>
     </tr>
     {% endfor %}
     </tbody>
     </table>
 
+    <h3>Limit Güncelle</h3>
     <form method="post">
-    <select name="symbol">
-    {% for s in watchlist.keys() %}
-    <option value="{{s}}">{{s}}</option>
-    {% endfor %}
-    </select>
-    <input name="lower" placeholder="Alt">
-    <input name="upper" placeholder="Üst">
-    <button>Güncelle</button>
+        <select name="symbol">
+        {% for s in watchlist.keys() %}
+            <option value="{{s}}">{{s}}</option>
+        {% endfor %}
+        </select>
+        <input name="lower" placeholder="Alt">
+        <input name="upper" placeholder="Üst">
+        <button>Güncelle</button>
     </form>
 
     <script>
     async function refresh(){
         const r=await fetch("/api/data");
         const d=await r.json();
+
         for(const s in d.prices){
-            document.getElementById("price-"+s).innerText=d.prices[s]??"Yok";
+            const price=d.prices[s];
+            const lower=d.watchlist[s].lower;
+            const upper=d.watchlist[s].upper;
+
+            document.getElementById("price-"+s).innerText=price??"Yok";
+
+            if(price){
+                const distance = ((price-lower)/(upper-lower))*100;
+                document.getElementById("distance-"+s).innerText =
+                    distance.toFixed(1)+"%";
+                document.getElementById("conf-"+s).style.width =
+                    Math.min(100,Math.max(0,distance))+"%";
+            }
+
             const signal=d.signals[s];
             const cell=document.getElementById("signal-"+s);
             cell.innerHTML="";
             const badge=document.createElement("span");
             badge.classList.add("badge");
+
             if(signal==="AL"){badge.classList.add("buy");badge.innerText="AL";}
             else if(signal==="SAT"){badge.classList.add("sell");badge.innerText="SAT";}
             else if(signal==="VERİ YOK"){badge.classList.add("nov");badge.innerText="YOK";}
             else{badge.classList.add("wait");badge.innerText="BEKLE";}
+
             cell.appendChild(badge);
         }
     }
-    setInterval(refresh,15000);
+
+    setInterval(refresh,10000);
     refresh();
     </script>
 
     </body>
     </html>
     """
-    return render_template_string(html, watchlist=snapshot)
+
+    return render_template_string(
+        html,
+        watchlist=snapshot,
+        market_status=market_status
+    )
 
 if __name__ == "__main__":
     ensure_monitor_started()
