@@ -10,11 +10,14 @@ from datetime import datetime
 app = Flask(__name__)
 
 # ==========================
-# ENV
+# ENV (NO DEFAULT TOKEN!)
 # ==========================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8023661442:AAHVsU9FBN35FMaW787m3EtIOIjpTtnZfhc").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1090532341").strip()
 CHECK_INTERVAL_SEC = int(os.environ.get("CHECK_INTERVAL_SEC", "900"))  # 15 dk
+
+if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    print("⚠ TELEGRAM ENV VARIABLES MISSING")
 
 # ==========================
 # WATCHLIST
@@ -30,20 +33,14 @@ WATCHLIST = {
 # TELEGRAM
 # ==========================
 def send_telegram(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message
-            },
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
             timeout=5
         )
-    except:
-        pass
-
+    except Exception as e:
+        print(f"Telegram error: {e}")
 
 # ==========================
 # INDICATORS
@@ -56,8 +53,8 @@ def rsi(series, period=14):
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()
     rs = gain / loss.replace(0, pd.NA)
-    return 100 - (100 / (1 + rs))
-
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(0)
 
 # ==========================
 # SWING ENGINE
@@ -97,9 +94,9 @@ def analyze_stock(symbol):
 
         return None
 
-    except:
+    except Exception as e:
+        print(f"{symbol} analyze error: {e}")
         return None
-
 
 # ==========================
 # MONITOR LOOP
@@ -109,35 +106,40 @@ def swing_monitor():
 
     while True:
         try:
+            print(f"[{datetime.now().isoformat()}] Checking stocks...")
+
             for symbol, data in WATCHLIST.items():
+                print(f"Checking {symbol}")
 
                 result = analyze_stock(symbol)
 
-                if result and data["last_signal"] != "BUY":
+                if result:
+                    if data["last_signal"] != "BUY":
 
-                    message = (
-                        f"📈 SWING FIRSATI\n\n"
-                        f"Hisse: {result['symbol']}\n"
-                        f"Fiyat: {result['price']}\n"
-                        f"Destek: {result['support']}\n"
-                        f"Hedef: {result['target']}\n"
-                        f"Potansiyel: %{result['potential']}\n"
-                        f"RSI: {result['rsi']}"
-                    )
+                        message = (
+                            f"📈 SWING FIRSATI\n\n"
+                            f"Hisse: {result['symbol']}\n"
+                            f"Fiyat: {result['price']}\n"
+                            f"Destek: {result['support']}\n"
+                            f"Hedef: {result['target']}\n"
+                            f"Potansiyel: %{result['potential']}\n"
+                            f"RSI: {result['rsi']}"
+                        )
 
-                    send_telegram(message)
-                    data["last_signal"] = "BUY"
+                        send_telegram(message)
+                        data["last_signal"] = "BUY"
+                        data["last_price"] = result["price"]
 
-                elif not result and data["last_signal"] is not None:
-                    data["last_signal"] = None
+                else:
+                    if data["last_signal"] is not None:
+                        data["last_signal"] = None
 
-            print(f"Next check in {CHECK_INTERVAL_SEC} seconds")
+            print(f"Next check in {CHECK_INTERVAL_SEC} seconds\n")
             time.sleep(CHECK_INTERVAL_SEC)
 
         except Exception as e:
             print(f"Monitor error: {e}")
             time.sleep(60)
-
 
 # ==========================
 # API STATUS
@@ -151,11 +153,11 @@ def state():
         "timestamp": datetime.now().isoformat()
     })
 
-
 # ==========================
-# START (Gunicorn uyumlu)
+# START (Gunicorn Safe)
 # ==========================
 def start_bot():
+    print("Bot starting...")
     send_telegram("🚀 BIST SWING BOT AKTIF")
     threading.Thread(target=swing_monitor, daemon=True).start()
 
