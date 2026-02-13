@@ -1,186 +1,147 @@
-# app.py
-# -*- coding: utf-8 -*-
-
 import os
 import time
 import threading
 import requests
+import yfinance as yf
 import pandas as pd
-from dataclasses import dataclass, asdict
-from typing import Dict
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify
+from datetime import datetime
 
-# -------------------------
+app = Flask(__name__)
+
+# ==========================
 # ENV
-# -------------------------
-TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "55f5c55b141b4ffc90f614ce796829b8").strip()
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "1090532341").strip()
+# ==========================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8023661442:AAGYLLB-PDEXj78ofTvvrhFt1Lx2QNp2tv0").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1090532341").strip()
-CHECK_INTERVAL_SEC = int(os.environ.get("CHECK_INTERVAL_SEC", "180"))
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "tv_super_secret_2026").strip()
+CHECK_INTERVAL_SEC = int(os.environ.get("CHECK_INTERVAL_SEC", "900"))  # 15 dk
 
-# ========================
-# CONFIG
-# ========================
-WATCHLIST = ["FROTO", "TUPRS", "ASELS", "MGROS"]
+# ==========================
+# WATCHLIST
+# ==========================
+WATCHLIST = [
+    "ASELS.IS",
+    "TUPRS.IS",
+    "FROTO.IS",
+    "MGROS.IS"
+]
 
-SYMBOL_MAP: Dict[str, str] = {
-    "FROTO": "FROTO:BIST",
-    "TUPRS": "TUPRS:BIST",
-    "ASELS": "ASELS:BIST",
-    "MGROS": "MGROS:BIST",
-}
+# ==========================
+# TELEGRAM
+# ==========================
+def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message
+            },
+            timeout=5
+        )
+    except:
+        pass
 
-# ========================
+# ==========================
 # INDICATORS
-# ========================
-def ema(series: pd.Series, span: int):
+# ==========================
+def ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
 
-def rsi(series: pd.Series, period: int = 14):
+def rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / (loss.replace(0, pd.NA))
+    rs = gain / loss.replace(0, pd.NA)
     return 100 - (100 / (1 + rs))
 
-# ========================
-# DATA
-# ========================
-def fetch_ohlc(symbol: str):
-    url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": symbol,
-        "interval": "1day",
-        "outputsize": "260",
-        "apikey": TWELVEDATA_API_KEY,
-    }
+# ==========================
+# SWING ENGINE
+# ==========================
+def analyze_stock(symbol):
+    try:
+        df = yf.download(symbol, period="6mo", interval="1d", progress=False)
+        if df.empty:
+            return None
 
-    r = requests.get(url, params=params, timeout=15)
-    r.raise_for_status()
-    data = r.json()
+        df["EMA50"] = ema(df["Close"], 50)
+        df["RSI"] = rsi(df["Close"])
 
-    if data.get("status") == "error":
-        raise RuntimeError(data.get("message"))
+        current_price = df["Close"].iloc[-1]
+        ema50 = df["EMA50"].iloc[-1]
+        rsi_value = df["RSI"].iloc[-1]
 
-    values = list(reversed(data.get("values", [])))
-    if not values:
-        raise RuntimeError("No data")
+        support_20 = df["Low"].rolling(20).min().iloc[-1]
+        recent_high = df["High"].rolling(60).max().iloc[-1]
 
-    df = pd.DataFrame(values)
-    for c in ["open", "high", "low", "close"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+        potential = ((recent_high - current_price) / current_price) * 100
 
-    df["datetime"] = pd.to_datetime(df["datetime"])
-    df.set_index("datetime", inplace=True)
-    return df.dropna()
+        # === STRATEGY CONDITIONS ===
+        trend_up = current_price > ema50
+        dip_zone = rsi_value < 40
+        near_support = current_price <= support_20 * 1.03
+        good_potential = potential >= 10
 
-# ========================
-# TELEGRAM
-# ========================
-def send_telegram(text: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
+        if trend_up and dip_zone and near_support and good_potential:
+            return {
+                "symbol": symbol,
+                "price": round(current_price, 2),
+                "support": round(support_20, 2),
+                "target": round(recent_high, 2),
+                "potential": round(potential, 1),
+                "rsi": round(rsi_value, 1)
+            }
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text
-    }, timeout=10)
+        return None
 
-# ========================
-# ENGINE
-# ========================
-@dataclass
-class SignalResult:
-    symbol: str
-    price: float
-    signal: str
-    note: str
+    except:
+        return None
 
-STATE = {}
-LOCK = threading.Lock()
-WORKER_STARTED = False
-
-def analyze(symbol: str):
-    df = fetch_ohlc(SYMBOL_MAP[symbol])
-    close = df["close"]
-    low = df["low"]
-
-    price = float(close.iloc[-1])
-    ema50 = float(ema(close, 50).iloc[-1])
-    ema200 = float(ema(close, 200).iloc[-1])
-    rsi14 = float(rsi(close, 14).iloc[-1])
-
-    trend_ok = price > ema50 and ema50 > ema200
-    rsi_ok = 40 <= rsi14 <= 55
-    signal = "AL" if trend_ok and rsi_ok else "BEKLE"
-
-    return SignalResult(symbol, price, signal, f"RSI:{rsi14:.1f}")
-
-def refresh():
-    for s in WATCHLIST:
-        try:
-            res = analyze(s)
-            with LOCK:
-                STATE[s] = res
-
-            if res.signal == "AL":
-                send_telegram(f"📌 {s} AL\nFiyat: {res.price:.2f}")
-
-        except Exception as e:
-            with LOCK:
-                STATE[s] = SignalResult(s, 0, "HATA", str(e))
-
-def worker():
+# ==========================
+# MONITOR LOOP
+# ==========================
+def swing_monitor():
+    print("Swing monitor started")
     while True:
-        refresh()
-        time.sleep(CHECK_INTERVAL_SEC)
+        try:
+            for symbol in WATCHLIST:
+                result = analyze_stock(symbol)
 
-def start_background():
-    global WORKER_STARTED
-    if WORKER_STARTED:
-        return
-    WORKER_STARTED = True
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
+                if result:
+                    message = (
+                        f"📈 SWING FIRSATI\n\n"
+                        f"Hisse: {result['symbol']}\n"
+                        f"Fiyat: {result['price']}\n"
+                        f"Destek: {result['support']}\n"
+                        f"Hedef: {result['target']}\n"
+                        f"Potansiyel: %{result['potential']}\n"
+                        f"RSI: {result['rsi']}"
+                    )
 
-# ========================
-# FLASK
-# ========================
-app = Flask(__name__)
+                    send_telegram(message)
 
-@app.route("/")
-def home():
-    with LOCK:
-        data = {k: asdict(v) for k, v in STATE.items()}
+            time.sleep(CHECK_INTERVAL_SEC)
 
-    html = """
-    <h2>Smart Signal Panel</h2>
-    <table border="1" cellpadding="8">
-        <tr><th>Sembol</th><th>Fiyat</th><th>Sinyal</th><th>Not</th></tr>
-        {% for s, d in data.items() %}
-        <tr>
-            <td>{{ s }}</td>
-            <td>{{ "%.2f"|format(d.price) if d.price > 0 else "-" }}</td>
-            <td>{{ d.signal }}</td>
-            <td>{{ d.note }}</td>
-        </tr>
-        {% endfor %}
-    </table>
-    """
-    return render_template_string(html, data=data)
+        except:
+            time.sleep(60)
 
+# ==========================
+# API STATUS
+# ==========================
 @app.route("/api/state")
 def state():
-    with LOCK:
-        return jsonify({k: asdict(v) for k, v in STATE.items()})
+    return jsonify({
+        "status": "running",
+        "watchlist": WATCHLIST,
+        "check_interval_sec": CHECK_INTERVAL_SEC
+    })
 
-# ========================
-# START (GUNICORN SAFE)
-# ========================
-start_background()
+# ==========================
+# START
+# ==========================
+threading.Thread(target=swing_monitor, daemon=True).start()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
