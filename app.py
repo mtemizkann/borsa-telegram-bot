@@ -20,10 +20,10 @@ CHECK_INTERVAL_SEC = int(os.environ.get("CHECK_INTERVAL_SEC", "900"))  # 15 dk
 # WATCHLIST
 # ==========================
 WATCHLIST = {
-    "ASELS.IS": {"last_signal": None},
-    "TUPRS.IS": {"last_signal": None},
-    "FROTO.IS": {"last_signal": None},
-    "MGROS.IS": {"last_signal": None}
+    "ASELS.IS": {"last_signal": None, "last_price": None},
+    "TUPRS.IS": {"last_signal": None, "last_price": None},
+    "FROTO.IS": {"last_signal": None, "last_price": None},
+    "MGROS.IS": {"last_signal": None, "last_price": None}
 }
 
 # ==========================
@@ -64,7 +64,7 @@ def rsi(series, period=14):
 # ==========================
 def analyze_stock(symbol):
     try:
-        df = yf.download(symbol, period="6mo", interval="1d", progress=False)
+        df = yf.download(symbol, period="3mo", interval="1d", progress=False)
         if df.empty:
             return None
 
