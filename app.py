@@ -144,4 +144,5 @@ def state():
 threading.Thread(target=swing_monitor, daemon=True).start()
 
 if __name__ == "__main__":
+    send_telegram("🚀 BIST SWING BOT AKTIF")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
