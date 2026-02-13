@@ -19,12 +19,12 @@ CHECK_INTERVAL_SEC = int(os.environ.get("CHECK_INTERVAL_SEC", "900"))  # 15 dk
 # ==========================
 # WATCHLIST
 # ==========================
-WATCHLIST = [
-    "ASELS.IS",
-    "TUPRS.IS",
-    "FROTO.IS",
-    "MGROS.IS"
-]
+WATCHLIST = {
+    "ASELS.IS": {"last_signal": None},
+    "TUPRS.IS": {"last_signal": None},
+    "FROTO.IS": {"last_signal": None},
+    "MGROS.IS": {"last_signal": None}
+}
 
 # ==========================
 # TELEGRAM
