@@ -108,8 +108,27 @@ def swing_monitor():
 
     while True:
         try:
-            for symbol in WATCHLIST:
-                result = analyze_stock(symbol)
+            for symbol, data in WATCHLIST.items():
+    result = analyze_stock(symbol)
+
+    if result:
+        if data["last_signal"] != "BUY":
+
+            message = (
+                f"📈 SWING FIRSATI\n\n"
+                f"Hisse: {result['symbol']}\n"
+                f"Fiyat: {result['price']}\n"
+                f"Destek: {result['support']}\n"
+                f"Hedef: {result['target']}\n"
+                f"Potansiyel: %{result['potential']}\n"
+                f"RSI: {result['rsi']}"
+            )
+
+            send_telegram(message)
+            data["last_signal"] = "BUY"
+
+    else:
+        data["last_signal"] = None
 
                 if result:
                     message = (
