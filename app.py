@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 import yfinance as yf
-import pandas as pd
 from flask import Flask, request, render_template_string, jsonify
 
 app = Flask(__name__)
@@ -21,27 +20,76 @@ RISK_PERCENT = float(os.environ.get("RISK_PERCENT", "2").replace(",", "."))
 
 # ================= STATE =================
 WATCHLIST: Dict[str, Dict[str, Any]] = {
-    "ASELS.IS": {},
-    "TUPRS.IS": {},
-    "FROTO.IS": {},
+    "ASELS.IS": {"lower": 290.0, "upper": 310.0, "alerted": None},
+    "TUPRS.IS": {"lower": 140.0, "upper": 170.0, "alerted": None},
+    "FROTO.IS": {"lower": 850.0, "upper": 900.0, "alerted": None},
 }
 
+_TICKERS: Dict[str, yf.Ticker] = {}
 _state_lock = threading.Lock()
+_monitor_started = False
+_monitor_lock = threading.Lock()
 
 # ================= HELPERS =================
-def safe_round(x: Any, ndigits: int = 2):
+def tr_float(x: Any, default: Optional[float] = None) -> Optional[float]:
     try:
+        if x is None:
+            return default
+        s = str(x).strip()
+        if not s:
+            return default
+        return float(s.replace(",", "."))
+    except Exception:
+        return default
+
+def safe_round(x: Any, ndigits: int = 2) -> Optional[float]:
+    try:
+        if x is None:
+            return None
         return round(float(x), ndigits)
-    except:
+    except Exception:
         return None
 
-def market_open():
+def market_open() -> bool:
     now = datetime.now()
     if now.weekday() >= 5:
         return False
     return 9 <= now.hour < 18
 
-def send_telegram(message: str):
+def get_ticker(symbol: str) -> yf.Ticker:
+    if symbol not in _TICKERS:
+        _TICKERS[symbol] = yf.Ticker(symbol)
+    return _TICKERS[symbol]
+
+def fetch_last_price(symbol: str) -> Optional[float]:
+    try:
+        t = get_ticker(symbol)
+        hist = t.history(period="1d", interval="1m", actions=False, timeout=5)
+        if hist is None or hist.empty:
+            return None
+        return float(hist["Close"].iloc[-1])
+    except Exception:
+        return None
+
+def generate_signal(price: Optional[float], lower: float, upper: float) -> str:
+    if price is None:
+        return "VERİ YOK"
+    if price <= lower:
+        return "AL"
+    if price >= upper:
+        return "SAT"
+    return "BEKLE"
+
+def calculate_position(entry: float, stop: float) -> Tuple[int, float]:
+    risk_amount = ACCOUNT_SIZE * (RISK_PERCENT / 100.0)
+    per_share_risk = abs(entry - stop)
+    if per_share_risk <= 0:
+        return 0, 0.0
+    lot = int(risk_amount / per_share_risk)
+    total_risk = lot * per_share_risk
+    return lot, total_risk
+
+def send_telegram(message: str) -> None:
     if not TOKEN or not CHAT_ID:
         return
     try:
@@ -50,187 +98,171 @@ def send_telegram(message: str):
             json={"chat_id": CHAT_ID, "text": message},
             timeout=5,
         )
-    except:
+    except Exception:
         pass
 
-# ================= SMART ANALYSIS =================
-def calculate_indicators(symbol: str):
-    try:
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period="3mo", interval="1d")
+# ================= MONITOR =================
+def price_monitor_loop():
+    while True:
+        try:
+            if not market_open():
+                time.sleep(60)
+                continue
 
-        if hist is None or hist.empty or len(hist) < 50:
-            return None
+            with _state_lock:
+                snapshot = {k: v.copy() for k, v in WATCHLIST.items()}
 
-        hist = hist.dropna()
+            for symbol, d in snapshot.items():
+                price = fetch_last_price(symbol)
+                if price is None:
+                    continue
 
-        # EMA
-        hist["EMA20"] = hist["Close"].ewm(span=20).mean()
-        hist["EMA50"] = hist["Close"].ewm(span=50).mean()
+                lower = float(d["lower"])
+                upper = float(d["upper"])
 
-        # RSI
-        delta = hist["Close"].diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
+                with _state_lock:
+                    st = WATCHLIST.get(symbol)
+                    if not st:
+                        continue
 
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
+                    alerted = st.get("alerted")
 
-        if avg_loss.iloc[-1] == 0:
-            return None
+                    if price <= lower and alerted != "lower":
+                        stop = upper
+                        lot, total_risk = calculate_position(price, stop)
+                        send_telegram(
+                            f"🟢 AL\n{symbol}\n"
+                            f"Fiyat: {safe_round(price)}\n"
+                            f"Stop: {safe_round(stop)}\n"
+                            f"Lot: {lot}\nRisk: {safe_round(total_risk)}"
+                        )
+                        st["alerted"] = "lower"
 
-        rs = avg_gain / avg_loss
-        hist["RSI"] = 100 - (100 / (1 + rs))
+                    elif price >= upper and alerted != "upper":
+                        stop = lower
+                        lot, total_risk = calculate_position(price, stop)
+                        send_telegram(
+                            f"🔴 SAT\n{symbol}\n"
+                            f"Fiyat: {safe_round(price)}\n"
+                            f"Stop: {safe_round(stop)}\n"
+                            f"Lot: {lot}\nRisk: {safe_round(total_risk)}"
+                        )
+                        st["alerted"] = "upper"
 
-        latest = hist.iloc[-1]
+                    elif lower < price < upper:
+                        st["alerted"] = None
 
-        high20 = hist["High"].tail(20).max()
-        low20 = hist["Low"].tail(20).min()
+            time.sleep(30)
 
-        if high20 == low20:
-            return None
+        except Exception:
+            time.sleep(10)
 
-        range_pos = (latest["Close"] - low20) / (high20 - low20)
+def ensure_monitor_started():
+    global _monitor_started
+    if _monitor_started:
+        return
+    with _monitor_lock:
+        if _monitor_started:
+            return
+        threading.Thread(target=price_monitor_loop, daemon=True).start()
+        _monitor_started = True
 
-        return {
-            "price": float(latest["Close"]),
-            "ema20": float(latest["EMA20"]),
-            "ema50": float(latest["EMA50"]),
-            "rsi": float(latest["RSI"]),
-            "range_pos": float(range_pos),
-        }
-
-    except Exception as e:
-        print("Indicator error:", e)
-        return None
-
-
-def generate_smart_signal(data):
-    if not data:
-        return "VERİ YOK", 0
-
-    score = 0
-
-    # Trend
-    if data["ema20"] > data["ema50"]:
-        score += 30
-    else:
-        score -= 10
-
-    # RSI dip bölgesi
-    if 35 < data["rsi"] < 55:
-        score += 30
-    elif data["rsi"] > 70:
-        score -= 20
-
-    # Range alt bölge
-    if data["range_pos"] < 0.4:
-        score += 20
-    elif data["range_pos"] > 0.8:
-        score -= 20
-
-    confidence = max(0, min(score, 100))
-
-    if score >= 60:
-        return "AL", confidence
-    elif score <= 20:
-        return "SAT", confidence
-    else:
-        return "BEKLE", confidence
+@app.before_request
+def start_monitor_once():
+    ensure_monitor_started()
 
 # ================= API =================
-@app.route("/api/data")
+@app.route("/api/data", methods=["GET"])
 def api_data():
-
-    result = {}
-
     with _state_lock:
-        symbols = list(WATCHLIST.keys())
+        snapshot = {k: v.copy() for k, v in WATCHLIST.items()}
 
-    for s in symbols:
-        data = calculate_indicators(s)
-        if not data:
-            continue
+    prices = {}
+    signals = {}
 
-        signal, confidence = generate_smart_signal(data)
+    for s, d in snapshot.items():
+        p = fetch_last_price(s)
+        prices[s] = safe_round(p)
+        signals[s] = generate_signal(p, float(d["lower"]), float(d["upper"]))
 
-        result[s] = {
-            "price": safe_round(data["price"]),
-            "signal": signal,
-            "confidence": confidence
-        }
-
-    return jsonify(result)
+    return jsonify({"prices": prices, "watchlist": snapshot, "signals": signals})
 
 # ================= PANEL =================
-@app.route("/")
+@app.route("/", methods=["GET", "POST"])
 def home():
+    if request.method == "POST":
+        symbol = request.form.get("symbol")
+        lower = tr_float(request.form.get("lower"))
+        upper = tr_float(request.form.get("upper"))
+
+        if symbol in WATCHLIST and lower is not None and upper is not None:
+            with _state_lock:
+                WATCHLIST[symbol]["lower"] = lower
+                WATCHLIST[symbol]["upper"] = upper
+                WATCHLIST[symbol]["alerted"] = None
+
+    with _state_lock:
+        snapshot = {k: v.copy() for k, v in WATCHLIST.items()}
 
     html = """
     <html>
     <head>
-    <title>BIST Smart AI Panel</title>
-    <style>
-    body{background:#0d1117;color:white;font-family:Arial;padding:40px}
-    table{width:100%;margin-top:30px}
-    th,td{text-align:center;padding:15px}
-    .buy{background:#0f5132}
-    .sell{background:#842029}
-    .wait{background:#444}
-    </style>
+    <title>BIST Professional Alarm Panel</title>
     </head>
     <body>
-    <h1>📊 BIST Smart AI Panel</h1>
+    <h1>BIST Alarm Panel</h1>
 
-    <table border="0">
-    <thead>
+    <table border="1" cellpadding="10">
     <tr>
-    <th>Hisse</th>
-    <th>Fiyat</th>
-    <th>Sinyal</th>
-    <th>Confidence</th>
+        <th>Hisse</th>
+        <th>Fiyat</th>
+        <th>Alt</th>
+        <th>Üst</th>
+        <th>Sinyal</th>
     </tr>
-    </thead>
-    <tbody id="table"></tbody>
+    {% for s in watchlist %}
+    <tr>
+        <td>{{s}}</td>
+        <td id="price-{{s}}">-</td>
+        <td>{{watchlist[s]["lower"]}}</td>
+        <td>{{watchlist[s]["upper"]}}</td>
+        <td id="signal-{{s}}">-</td>
+    </tr>
+    {% endfor %}
     </table>
 
+    <form method="post">
+    <select name="symbol">
+    {% for s in watchlist %}
+        <option value="{{s}}">{{s}}</option>
+    {% endfor %}
+    </select>
+    <input name="lower" placeholder="Alt Limit">
+    <input name="upper" placeholder="Üst Limit">
+    <button type="submit">Güncelle</button>
+    </form>
+
     <script>
-    async function load(){
+    async function refresh(){
         const r = await fetch("/api/data");
         const d = await r.json();
-
-        const table = document.getElementById("table");
-        table.innerHTML = "";
-
-        for(const s in d){
-            const row = document.createElement("tr");
-
-            let cls="wait";
-            if(d[s].signal==="AL") cls="buy";
-            if(d[s].signal==="SAT") cls="sell";
-
-            row.classList.add(cls);
-
-            row.innerHTML = `
-                <td>${s}</td>
-                <td>${d[s].price}</td>
-                <td>${d[s].signal}</td>
-                <td>%${d[s].confidence}</td>
-            `;
-
-            table.appendChild(row);
+        for(const s in d.prices){
+            document.getElementById("price-"+s).innerText =
+                d.prices[s]===null ? "Veri Yok" : d.prices[s];
+            document.getElementById("signal-"+s).innerText =
+                d.signals[s];
         }
     }
-
-    setInterval(load,15000);
-    load();
+    setInterval(refresh,15000);
+    refresh();
     </script>
 
     </body>
     </html>
     """
 
-    return render_template_string(html)
+    return render_template_string(html, watchlist=snapshot)
 
 if __name__ == "__main__":
+    ensure_monitor_started()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
