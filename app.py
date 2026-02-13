@@ -7,90 +7,41 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 import yfinance as yf
-from flask import Flask, request, render_template_string, jsonify, abort
+import pandas as pd
+from flask import Flask, request, render_template_string, jsonify
 
 app = Flask(__name__)
 
 # ================= ENV =================
 TOKEN = os.environ.get("TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
-SECRET = os.environ.get("SECRET", "").strip()
 
 ACCOUNT_SIZE = float(os.environ.get("ACCOUNT_SIZE", "150000").replace(",", "."))
 RISK_PERCENT = float(os.environ.get("RISK_PERCENT", "2").replace(",", "."))
 
 # ================= STATE =================
 WATCHLIST: Dict[str, Dict[str, Any]] = {
-    "ASELS.IS": {"lower": 290.0, "upper": 310.0, "alerted": None},
-    "TUPRS.IS": {"lower": 140.0, "upper": 170.0, "alerted": None},
-    "FROTO.IS": {"lower": 850.0, "upper": 900.0, "alerted": None},
+    "ASELS.IS": {},
+    "TUPRS.IS": {},
+    "FROTO.IS": {},
 }
 
-_TICKERS: Dict[str, yf.Ticker] = {}
 _state_lock = threading.Lock()
-_monitor_started = False
-_monitor_lock = threading.Lock()
 
 # ================= HELPERS =================
-def tr_float(x: Any, default: Optional[float] = None) -> Optional[float]:
+def safe_round(x: Any, ndigits: int = 2):
     try:
-        if x is None:
-            return default
-        s = str(x).strip()
-        if not s:
-            return default
-        return float(s.replace(",", "."))
-    except Exception:
-        return default
-
-def safe_round(x: Any, ndigits: int = 2) -> Optional[float]:
-    try:
-        if x is None:
-            return None
         return round(float(x), ndigits)
-    except Exception:
+    except:
         return None
 
-def market_open() -> bool:
+def market_open():
     now = datetime.now()
     if now.weekday() >= 5:
         return False
     return 9 <= now.hour < 18
 
-def get_ticker(symbol: str) -> yf.Ticker:
-    if symbol not in _TICKERS:
-        _TICKERS[symbol] = yf.Ticker(symbol)
-    return _TICKERS[symbol]
-
-def fetch_last_price(symbol: str) -> Optional[float]:
-    try:
-        t = get_ticker(symbol)
-        hist = t.history(period="1d", interval="1m", actions=False)
-        if hist is None or hist.empty:
-            return None
-        return float(hist["Close"].iloc[-1])
-    except Exception:
-        return None
-
-def generate_signal(price: Optional[float], lower: float, upper: float) -> str:
-    if price is None:
-        return "VERİ YOK"
-    if price <= lower:
-        return "AL"
-    if price >= upper:
-        return "SAT"
-    return "BEKLE"
-
-def calculate_position(entry: float, stop: float) -> Tuple[int, float]:
-    risk_amount = ACCOUNT_SIZE * (RISK_PERCENT / 100.0)
-    per_share_risk = abs(entry - stop)
-    if per_share_risk <= 0:
-        return 0, 0.0
-    lot = int(risk_amount / per_share_risk)
-    total_risk = lot * per_share_risk
-    return lot, total_risk
-
-def send_telegram(message: str) -> None:
+def send_telegram(message: str):
     if not TOKEN or not CHAT_ID:
         return
     try:
@@ -99,11 +50,68 @@ def send_telegram(message: str) -> None:
             json={"chat_id": CHAT_ID, "text": message},
             timeout=5,
         )
-    except Exception:
+    except:
         pass
 
+# ================= SMART ANALYSIS =================
+def calculate_indicators(symbol: str):
+
+    hist = yf.download(symbol, period="3mo", interval="1d")
+
+    if hist.empty:
+        return None
+
+    hist["EMA20"] = hist["Close"].ewm(span=20).mean()
+    hist["EMA50"] = hist["Close"].ewm(span=50).mean()
+
+    delta = hist["Close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss
+    hist["RSI"] = 100 - (100 / (1 + rs))
+
+    latest = hist.iloc[-1]
+
+    high20 = hist["High"].tail(20).max()
+    low20 = hist["Low"].tail(20).min()
+
+    range_pos = (latest["Close"] - low20) / (high20 - low20)
+
+    return {
+        "price": float(latest["Close"]),
+        "ema20": float(latest["EMA20"]),
+        "ema50": float(latest["EMA50"]),
+        "rsi": float(latest["RSI"]),
+        "range_pos": float(range_pos)
+    }
+
+def generate_smart_signal(data):
+
+    score = 0
+
+    if data["ema20"] > data["ema50"]:
+        score += 30
+
+    if 35 < data["rsi"] < 55:
+        score += 30
+
+    if data["range_pos"] < 0.4:
+        score += 20
+
+    confidence = min(score, 100)
+
+    if score >= 60:
+        return "AL", confidence
+    elif score <= 20:
+        return "SAT", confidence
+    else:
+        return "BEKLE", confidence
+
 # ================= MONITOR =================
-def price_monitor_loop():
+def monitor_loop():
     while True:
         try:
             if not market_open():
@@ -111,336 +119,121 @@ def price_monitor_loop():
                 continue
 
             with _state_lock:
-                snapshot = json.loads(json.dumps(WATCHLIST))
+                symbols = list(WATCHLIST.keys())
 
-            for symbol, d in snapshot.items():
-                price = fetch_last_price(symbol)
-                if price is None:
+            for s in symbols:
+                data = calculate_indicators(s)
+                if not data:
                     continue
 
-                lower = float(d["lower"])
-                upper = float(d["upper"])
+                signal, confidence = generate_smart_signal(data)
 
-                with _state_lock:
-                    st = WATCHLIST.get(symbol)
-                    if not st:
-                        continue
+                if signal == "AL":
+                    send_telegram(f"🟢 AL\n{s}\nFiyat: {safe_round(data['price'])}\nConfidence: %{confidence}")
 
-                    alerted = st.get("alerted")
+                elif signal == "SAT":
+                    send_telegram(f"🔴 SAT\n{s}\nFiyat: {safe_round(data['price'])}\nConfidence: %{confidence}")
 
-                    if price <= lower and alerted != "lower":
-                        stop = upper
-                        lot, total_risk = calculate_position(price, stop)
-                        send_telegram(
-                            f"🟢 AL\n{symbol}\n"
-                            f"Fiyat: {safe_round(price)}\n"
-                            f"Stop: {safe_round(stop)}\n"
-                            f"Lot: {lot}\nRisk: {safe_round(total_risk)}"
-                        )
-                        st["alerted"] = "lower"
+            time.sleep(1800)  # 30 dk da bir telegram
 
-                    elif price >= upper and alerted != "upper":
-                        stop = lower
-                        lot, total_risk = calculate_position(price, stop)
-                        send_telegram(
-                            f"🔴 SAT\n{symbol}\n"
-                            f"Fiyat: {safe_round(price)}\n"
-                            f"Stop: {safe_round(stop)}\n"
-                            f"Lot: {lot}\nRisk: {safe_round(total_risk)}"
-                        )
-                        st["alerted"] = "upper"
+        except:
+            time.sleep(60)
 
-                    elif lower < price < upper:
-                        st["alerted"] = None
-
-            time.sleep(30)
-        except Exception:
-            time.sleep(10)
-
-def ensure_monitor_started():
-    global _monitor_started
-    if _monitor_started:
-        return
-    with _monitor_lock:
-        if _monitor_started:
-            return
-        threading.Thread(target=price_monitor_loop, daemon=True).start()
-        _monitor_started = True
-
-@app.before_request
-def start_monitor_once():
-    ensure_monitor_started()
+threading.Thread(target=monitor_loop, daemon=True).start()
 
 # ================= API =================
-@app.route("/api/data", methods=["GET"])
+@app.route("/api/data")
 def api_data():
+
+    result = {}
+
     with _state_lock:
-        snapshot = json.loads(json.dumps(WATCHLIST))
+        symbols = list(WATCHLIST.keys())
 
-    prices = {}
-    signals = {}
+    for s in symbols:
+        data = calculate_indicators(s)
+        if not data:
+            continue
 
-    for s, d in snapshot.items():
-        p = fetch_last_price(s)
-        prices[s] = safe_round(p)
-        signals[s] = generate_signal(p, float(d["lower"]), float(d["upper"]))
+        signal, confidence = generate_smart_signal(data)
 
-    return jsonify({"prices": prices, "watchlist": snapshot, "signals": signals})
+        result[s] = {
+            "price": safe_round(data["price"]),
+            "signal": signal,
+            "confidence": confidence
+        }
+
+    return jsonify(result)
 
 # ================= PANEL =================
-@app.route("/", methods=["GET", "POST"])
+@app.route("/")
 def home():
-    if request.method == "POST":
-        symbol = request.form.get("symbol")
-        lower = tr_float(request.form.get("lower"))
-        upper = tr_float(request.form.get("upper"))
-
-        if symbol and lower and upper:
-            with _state_lock:
-                WATCHLIST[symbol]["lower"] = lower
-                WATCHLIST[symbol]["upper"] = upper
-                WATCHLIST[symbol]["alerted"] = None
-
-    with _state_lock:
-        snapshot = json.loads(json.dumps(WATCHLIST))
-
-    market_status = "AÇIK" if market_open() else "KAPALI"
 
     html = """
-<html>
-<head>
-<title>BIST Professional Alarm Panel</title>
+    <html>
+    <head>
+    <title>BIST Smart AI Panel</title>
+    <style>
+    body{background:#0d1117;color:white;font-family:Arial;padding:40px}
+    table{width:100%;margin-top:30px}
+    th,td{text-align:center;padding:15px}
+    .buy{background:#0f5132}
+    .sell{background:#842029}
+    .wait{background:#444}
+    </style>
+    </head>
+    <body>
+    <h1>📊 BIST Smart AI Panel</h1>
 
-<style>
-body{
-    margin:0;
-    font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto;
-    background: radial-gradient(circle at 20% 20%, #0d1b2a, #000814 70%);
-    color:white;
-    padding:50px;
-}
+    <table border="0">
+    <thead>
+    <tr>
+    <th>Hisse</th>
+    <th>Fiyat</th>
+    <th>Sinyal</th>
+    <th>Confidence</th>
+    </tr>
+    </thead>
+    <tbody id="table"></tbody>
+    </table>
 
-.container{
-    max-width:1200px;
-    margin:auto;
-}
+    <script>
+    async function load(){
+        const r = await fetch("/api/data");
+        const d = await r.json();
 
-.header{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    margin-bottom:30px;
-}
+        const table = document.getElementById("table");
+        table.innerHTML = "";
 
-.badge-online{
-    background:#0f5132;
-    padding:6px 14px;
-    border-radius:20px;
-    font-size:13px;
-    opacity:0.9;
-}
+        for(const s in d){
+            const row = document.createElement("tr");
 
-.card{
-    background:rgba(255,255,255,0.05);
-    backdrop-filter: blur(18px);
-    border-radius:18px;
-    padding:30px;
-    box-shadow:0 0 40px rgba(0,0,0,0.5);
-    margin-bottom:30px;
-}
+            let cls="wait";
+            if(d[s].signal==="AL") cls="buy";
+            if(d[s].signal==="SAT") cls="sell";
 
-table{
-    width:100%;
-    border-collapse:collapse;
-}
+            row.classList.add(cls);
 
-th{
-    text-align:center;
-    opacity:0.6;
-    font-weight:500;
-    padding:18px 10px;
-}
+            row.innerHTML = `
+                <td>${s}</td>
+                <td>${d[s].price}</td>
+                <td>${d[s].signal}</td>
+                <td>%${d[s].confidence}</td>
+            `;
 
-td{
-    text-align:center;
-    padding:20px 10px;
-    font-size:18px;
-}
-
-tr{
-    transition:0.25s;
-}
-
-tr:hover{
-    background:rgba(255,255,255,0.03);
-}
-
-tr.sell{
-    background:rgba(132,32,41,0.18);
-}
-
-tr.buy{
-    background:rgba(15,81,50,0.18);
-}
-
-.signal{
-    padding:8px 18px;
-    border-radius:30px;
-    font-weight:600;
-    font-size:14px;
-}
-
-.wait{background:#343a40;}
-.sell-badge{background:#842029;}
-.buy-badge{background:#0f5132;}
-
-.form-row{
-    display:flex;
-    gap:15px;
-    align-items:center;
-}
-
-input,select{
-    padding:10px 15px;
-    border-radius:10px;
-    border:none;
-    background:rgba(255,255,255,0.1);
-    color:white;
-}
-
-button{
-    padding:10px 20px;
-    border:none;
-    border-radius:10px;
-    background:#0a84ff;
-    color:white;
-    font-weight:600;
-    cursor:pointer;
-    transition:0.2s;
-}
-
-button:hover{
-    opacity:0.85;
-}
-
-.system{
-    opacity:0.7;
-    font-size:14px;
-    line-height:1.6;
-}
-</style>
-</head>
-
-<body>
-<div class="container">
-
-<div class="header">
-<h1>📊 BIST Professional Alarm Panel</h1>
-<div class="badge-online">Online</div>
-</div>
-
-<div class="card">
-<table>
-<thead>
-<tr>
-<th>Hisse</th>
-<th>Anlık Fiyat</th>
-<th>Alt Limit</th>
-<th>Üst Limit</th>
-<th>Sinyal</th>
-</tr>
-</thead>
-
-<tbody>
-{% for s in watchlist %}
-<tr id="row-{{s}}">
-<td>{{s}}</td>
-<td id="price-{{s}}">-</td>
-<td>{{watchlist[s]["lower"]}}</td>
-<td>{{watchlist[s]["upper"]}}</td>
-<td id="signal-{{s}}">-</td>
-</tr>
-{% endfor %}
-</tbody>
-</table>
-</div>
-
-<div class="card">
-<h3>Limit Güncelle</h3>
-<form method="post" class="form-row">
-<select name="symbol">
-{% for s in watchlist %}
-<option value="{{s}}">{{s}}</option>
-{% endfor %}
-</select>
-<input name="lower" placeholder="Alt Limit">
-<input name="upper" placeholder="Üst Limit">
-<button type="submit">Güncelle</button>
-</form>
-</div>
-
-<div class="card system">
-• Web yenileme: 15 sn<br>
-• Telegram kontrol: 30 sn<br>
-• Market saatleri: 09:00–18:00 (Hafta içi)
-</div>
-
-</div>
-
-<script>
-async function refresh(){
-    const r = await fetch("/api/data");
-    const d = await r.json();
-
-    for(const s in d.prices){
-        const price = d.prices[s];
-        const signal = d.signals[s];
-
-        document.getElementById("price-"+s).innerText =
-            price===null ? "Veri Yok" : price;
-
-        const row = document.getElementById("row-"+s);
-        row.classList.remove("buy","sell");
-
-        const cell = document.getElementById("signal-"+s);
-        cell.innerHTML="";
-
-        let span = document.createElement("span");
-        span.classList.add("signal");
-
-        if(signal==="AL"){
-            span.classList.add("buy-badge");
-            span.innerText="AL";
-            row.classList.add("buy");
+            table.appendChild(row);
         }
-        else if(signal==="SAT"){
-            span.classList.add("sell-badge");
-            span.innerText="SAT";
-            row.classList.add("sell");
-        }
-        else{
-            span.classList.add("wait");
-            span.innerText="BEKLE";
-        }
-
-        cell.appendChild(span);
     }
-}
 
-setInterval(refresh,15000);
-refresh();
-</script>
+    setInterval(load,15000);
+    load();
+    </script>
 
-</body>
-</html>
-"""
+    </body>
+    </html>
+    """
 
-    return render_template_string(
-        html,
-        watchlist=snapshot,
-        market_status=market_status
-    )
+    return render_template_string(html)
 
 if __name__ == "__main__":
-    ensure_monitor_started()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
