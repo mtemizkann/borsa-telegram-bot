@@ -147,14 +147,19 @@ def state():
     return jsonify({
         "status": "running",
         "watchlist": WATCHLIST,
-        "check_interval_sec": CHECK_INTERVAL_SEC
+        "check_interval_sec": CHECK_INTERVAL_SEC,
+        "timestamp": datetime.now().isoformat()
     })
 
 
 # ==========================
 # START (Gunicorn uyumlu)
 # ==========================
-threading.Thread(target=swing_monitor, daemon=True).start()
+def start_bot():
+    send_telegram("🚀 BIST SWING BOT AKTIF")
+    threading.Thread(target=swing_monitor, daemon=True).start()
+
+start_bot()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
