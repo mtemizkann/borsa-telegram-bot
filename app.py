@@ -336,39 +336,51 @@ def home():
     </form>
 
     <script>
-    async function refresh(){
-        const r=await fetch("/api/data");
-        const d=await r.json();
+   async function refresh(){
+    const r = await fetch("/api/data");
+    const d = await r.json();
 
-        for(const s in d.prices){
-            const price=d.prices[s];
-            const lower=d.watchlist[s].lower;
-            const upper=d.watchlist[s].upper;
+    for(const s in d.prices){
+        const price = d.prices[s];
+        const lower = d.watchlist[s].lower;
+        const upper = d.watchlist[s].upper;
 
-            document.getElementById("price-"+s).innerText=price??"Yok";
+        document.getElementById("price-"+s).innerText = price ?? "Yok";
 
-            if(price){
-                const distance = ((price-lower)/(upper-lower))*100;
-                document.getElementById("distance-"+s).innerText =
-                    distance.toFixed(1)+"%";
-                document.getElementById("conf-"+s).style.width =
-                    Math.min(100,Math.max(0,distance))+"%";
+        if(price){
+            let position = ((price - lower) / (upper - lower)) * 100;
+            let breakout = 0;
+
+            if(price < lower){
+                breakout = ((lower - price) / lower) * 100;
+                position = 0;
+            }
+            else if(price > upper){
+                breakout = ((price - upper) / upper) * 100;
+                position = 100;
             }
 
-            const signal=d.signals[s];
-            const cell=document.getElementById("signal-"+s);
-            cell.innerHTML="";
-            const badge=document.createElement("span");
-            badge.classList.add("badge");
+            document.getElementById("distance-"+s).innerText =
+                position.toFixed(1) + "%";
 
-            if(signal==="AL"){badge.classList.add("buy");badge.innerText="AL";}
-            else if(signal==="SAT"){badge.classList.add("sell");badge.innerText="SAT";}
-            else if(signal==="VERİ YOK"){badge.classList.add("nov");badge.innerText="YOK";}
-            else{badge.classList.add("wait");badge.innerText="BEKLE";}
-
-            cell.appendChild(badge);
+            document.getElementById("conf-"+s).style.width =
+                Math.min(100, Math.max(0, position)) + "%";
         }
+
+        const signal = d.signals[s];
+        const cell = document.getElementById("signal-"+s);
+        cell.innerHTML = "";
+        const badge = document.createElement("span");
+        badge.classList.add("badge");
+
+        if(signal==="AL"){badge.classList.add("buy");badge.innerText="AL";}
+        else if(signal==="SAT"){badge.classList.add("sell");badge.innerText="SAT";}
+        else if(signal==="VERİ YOK"){badge.classList.add("nov");badge.innerText="YOK";}
+        else{badge.classList.add("wait");badge.innerText="BEKLE";}
+
+        cell.appendChild(badge);
     }
+}
 
     setInterval(refresh,10000);
     refresh();
