@@ -55,53 +55,81 @@ def send_telegram(message: str):
 
 # ================= SMART ANALYSIS =================
 def calculate_indicators(symbol: str):
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="3mo", interval="1d")
 
-    hist = yf.download(symbol, period="3mo", interval="1d")
+        if hist is None or hist.empty or len(hist) < 50:
+            return None
 
-    if hist.empty:
+        hist = hist.dropna()
+
+        # EMA
+        hist["EMA20"] = hist["Close"].ewm(span=20).mean()
+        hist["EMA50"] = hist["Close"].ewm(span=50).mean()
+
+        # RSI
+        delta = hist["Close"].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+
+        if avg_loss.iloc[-1] == 0:
+            return None
+
+        rs = avg_gain / avg_loss
+        hist["RSI"] = 100 - (100 / (1 + rs))
+
+        latest = hist.iloc[-1]
+
+        high20 = hist["High"].tail(20).max()
+        low20 = hist["Low"].tail(20).min()
+
+        if high20 == low20:
+            return None
+
+        range_pos = (latest["Close"] - low20) / (high20 - low20)
+
+        return {
+            "price": float(latest["Close"]),
+            "ema20": float(latest["EMA20"]),
+            "ema50": float(latest["EMA50"]),
+            "rsi": float(latest["RSI"]),
+            "range_pos": float(range_pos),
+        }
+
+    except Exception as e:
+        print("Indicator error:", e)
         return None
 
-    hist["EMA20"] = hist["Close"].ewm(span=20).mean()
-    hist["EMA50"] = hist["Close"].ewm(span=50).mean()
-
-    delta = hist["Close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    hist["RSI"] = 100 - (100 / (1 + rs))
-
-    latest = hist.iloc[-1]
-
-    high20 = hist["High"].tail(20).max()
-    low20 = hist["Low"].tail(20).min()
-
-    range_pos = (latest["Close"] - low20) / (high20 - low20)
-
-    return {
-        "price": float(latest["Close"]),
-        "ema20": float(latest["EMA20"]),
-        "ema50": float(latest["EMA50"]),
-        "rsi": float(latest["RSI"]),
-        "range_pos": float(range_pos)
-    }
 
 def generate_smart_signal(data):
+    if not data:
+        return "VERİ YOK", 0
 
     score = 0
 
+    # Trend
     if data["ema20"] > data["ema50"]:
         score += 30
+    else:
+        score -= 10
 
+    # RSI dip bölgesi
     if 35 < data["rsi"] < 55:
         score += 30
+    elif data["rsi"] > 70:
+        score -= 20
 
+    # Range alt bölge
     if data["range_pos"] < 0.4:
         score += 20
+    elif data["range_pos"] > 0.8:
+        score -= 20
 
-    confidence = min(score, 100)
+    confidence = max(0, min(score, 100))
 
     if score >= 60:
         return "AL", confidence
@@ -109,37 +137,6 @@ def generate_smart_signal(data):
         return "SAT", confidence
     else:
         return "BEKLE", confidence
-
-# ================= MONITOR =================
-def monitor_loop():
-    while True:
-        try:
-            if not market_open():
-                time.sleep(60)
-                continue
-
-            with _state_lock:
-                symbols = list(WATCHLIST.keys())
-
-            for s in symbols:
-                data = calculate_indicators(s)
-                if not data:
-                    continue
-
-                signal, confidence = generate_smart_signal(data)
-
-                if signal == "AL":
-                    send_telegram(f"🟢 AL\n{s}\nFiyat: {safe_round(data['price'])}\nConfidence: %{confidence}")
-
-                elif signal == "SAT":
-                    send_telegram(f"🔴 SAT\n{s}\nFiyat: {safe_round(data['price'])}\nConfidence: %{confidence}")
-
-            time.sleep(1800)  # 30 dk da bir telegram
-
-        except:
-            time.sleep(60)
-
-threading.Thread(target=monitor_loop, daemon=True).start()
 
 # ================= API =================
 @app.route("/api/data")
