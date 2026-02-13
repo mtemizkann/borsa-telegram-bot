@@ -141,11 +141,13 @@ def state():
     })
 
 # ==========================
-# START
+# START (Gunicorn uyumlu)
 # ==========================
-threading.Thread(target=swing_monitor, daemon=True).start()
 
-if __name__ == "__main__":
+def start_bot():
     send_telegram("🚀 BIST SWING BOT AKTIF")
-    send_telegram("🧪 TEST MESAJI")
+    threading.Thread(target=swing_monitor, daemon=True).start()
+
+start_bot()
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
