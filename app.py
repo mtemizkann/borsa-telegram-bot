@@ -104,6 +104,8 @@ def analyze_stock(symbol):
 # ==========================
 def swing_monitor():
     print("Swing monitor started")
+    send_telegram("BOT CALISIYOR TEST MESAJI")  # BUNU EKLE
+
     while True:
         try:
             for symbol in WATCHLIST:
