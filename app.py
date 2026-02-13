@@ -101,6 +101,9 @@ def analyze_stock(symbol):
 # ==========================
 # MONITOR LOOP
 # ==========================
+# ==========================
+# MONITOR LOOP
+# ==========================
 def swing_monitor():
     print("Swing monitor started")
 
@@ -113,26 +116,32 @@ def swing_monitor():
 
                 result = analyze_stock(symbol)
 
-                if result:
-                    if data["last_signal"] != "BUY":
+                # --- Her durumda son fiyatı güncelle ---
+                try:
+                    df_price = yf.download(symbol, period="5d", interval="1d", progress=False)
+                    if not df_price.empty:
+                        data["last_price"] = round(df_price["Close"].iloc[-1], 2)
+                except:
+                    pass
 
-                        message = (
-                            f"📈 SWING FIRSATI\n\n"
-                            f"Hisse: {result['symbol']}\n"
-                            f"Fiyat: {result['price']}\n"
-                            f"Destek: {result['support']}\n"
-                            f"Hedef: {result['target']}\n"
-                            f"Potansiyel: %{result['potential']}\n"
-                            f"RSI: {result['rsi']}"
-                        )
+                # --- Sinyal üretimi ---
+                if result and data["last_signal"] != "BUY":
 
-                        send_telegram(message)
-                        data["last_signal"] = "BUY"
-                        data["last_price"] = result["price"]
+                    message = (
+                        f"📈 SWING FIRSATI\n\n"
+                        f"Hisse: {result['symbol']}\n"
+                        f"Fiyat: {result['price']}\n"
+                        f"Destek: {result['support']}\n"
+                        f"Hedef: {result['target']}\n"
+                        f"Potansiyel: %{result['potential']}\n"
+                        f"RSI: {result['rsi']}"
+                    )
 
-                else:
-                    if data["last_signal"] is not None:
-                        data["last_signal"] = None
+                    send_telegram(message)
+                    data["last_signal"] = "BUY"
+
+                elif not result:
+                    data["last_signal"] = None
 
             print(f"Next check in {CHECK_INTERVAL_SEC} seconds\n")
             time.sleep(CHECK_INTERVAL_SEC)
