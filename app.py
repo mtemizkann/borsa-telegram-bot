@@ -14,6 +14,7 @@ app = Flask(__name__)
 # ================= ENV =================
 TOKEN = os.environ.get("TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
+RUN_MONITOR_IN_WEB = os.environ.get("RUN_MONITOR_IN_WEB", "false").strip().lower() == "true"
 
 ACCOUNT_SIZE = float(os.environ.get("ACCOUNT_SIZE", "150000").replace(",", "."))
 RISK_PERCENT = float(os.environ.get("RISK_PERCENT", "2").replace(",", "."))
@@ -169,7 +170,8 @@ def ensure_monitor_started():
 
 @app.before_request
 def start_monitor_once():
-    ensure_monitor_started()
+    if RUN_MONITOR_IN_WEB:
+        ensure_monitor_started()
 
 # ================= API =================
 @app.route("/api/data", methods=["GET"])
@@ -264,5 +266,6 @@ def home():
     return render_template_string(html, watchlist=snapshot)
 
 if __name__ == "__main__":
-    ensure_monitor_started()
+    if RUN_MONITOR_IN_WEB:
+        ensure_monitor_started()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))

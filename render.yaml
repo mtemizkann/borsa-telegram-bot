@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: borsa-telegram-web
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: RUN_MONITOR_IN_WEB
+        value: "false"
+
+  - type: worker
+    name: borsa-telegram-worker
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python worker.py
+    autoDeploy: true
+    envVars:
+      - key: CHECK_INTERVAL
+        value: "5"
