@@ -18,12 +18,13 @@ RUN_MONITOR_IN_WEB = os.environ.get("RUN_MONITOR_IN_WEB", "false").strip().lower
 
 ACCOUNT_SIZE = float(os.environ.get("ACCOUNT_SIZE", "150000").replace(",", "."))
 RISK_PERCENT = float(os.environ.get("RISK_PERCENT", "2").replace(",", "."))
+BAND_SIZE_TL = float(os.environ.get("BAND_SIZE_TL", "1").replace(",", "."))
 
 # ================= STATE =================
 WATCHLIST: Dict[str, Dict[str, Any]] = {
-    "ASELS.IS": {"lower": 290.0, "upper": 310.0, "alerted": None},
-    "TUPRS.IS": {"lower": 140.0, "upper": 170.0, "alerted": None},
-    "FROTO.IS": {"lower": 850.0, "upper": 900.0, "alerted": None},
+    "ASELS.IS": {"lower": 290.0, "upper": 310.0, "alerted": None, "initialized": False},
+    "TUPRS.IS": {"lower": 140.0, "upper": 170.0, "alerted": None, "initialized": False},
+    "FROTO.IS": {"lower": 850.0, "upper": 900.0, "alerted": None, "initialized": False},
 }
 
 _TICKERS: Dict[str, yf.Ticker] = {}
@@ -90,6 +91,14 @@ def calculate_position(entry: float, stop: float) -> Tuple[int, float]:
     total_risk = lot * per_share_risk
     return lot, total_risk
 
+def recenter_band(st: Dict[str, Any], center_price: float) -> Tuple[float, float]:
+    half_band = max(BAND_SIZE_TL, 0.01)
+    lower = round(center_price - half_band, 2)
+    upper = round(center_price + half_band, 2)
+    st["lower"] = lower
+    st["upper"] = upper
+    return lower, upper
+
 def send_telegram(message: str) -> None:
     if not TOKEN or not CHAT_ID:
         return
@@ -113,40 +122,52 @@ def price_monitor_loop():
             with _state_lock:
                 snapshot = {k: v.copy() for k, v in WATCHLIST.items()}
 
-            for symbol, d in snapshot.items():
+            for symbol in snapshot.keys():
                 price = fetch_last_price(symbol)
                 if price is None:
                     continue
-
-                lower = float(d["lower"])
-                upper = float(d["upper"])
 
                 with _state_lock:
                     st = WATCHLIST.get(symbol)
                     if not st:
                         continue
 
+                    if not st.get("initialized", False):
+                        recenter_band(st, price)
+                        st["alerted"] = None
+                        st["initialized"] = True
+                        continue
+
+                    lower = float(st["lower"])
+                    upper = float(st["upper"])
+
                     alerted = st.get("alerted")
 
                     if price <= lower and alerted != "lower":
                         stop = upper
                         lot, total_risk = calculate_position(price, stop)
+                        new_lower, new_upper = recenter_band(st, price)
                         send_telegram(
                             f"🟢 AL\n{symbol}\n"
                             f"Fiyat: {safe_round(price)}\n"
                             f"Stop: {safe_round(stop)}\n"
-                            f"Lot: {lot}\nRisk: {safe_round(total_risk)}"
+                            f"Lot: {lot}\n"
+                            f"Risk: {safe_round(total_risk)}\n"
+                            f"Yeni Bant: {safe_round(new_lower)} - {safe_round(new_upper)}"
                         )
                         st["alerted"] = "lower"
 
                     elif price >= upper and alerted != "upper":
                         stop = lower
                         lot, total_risk = calculate_position(price, stop)
+                        new_lower, new_upper = recenter_band(st, price)
                         send_telegram(
                             f"🔴 SAT\n{symbol}\n"
                             f"Fiyat: {safe_round(price)}\n"
                             f"Stop: {safe_round(stop)}\n"
-                            f"Lot: {lot}\nRisk: {safe_round(total_risk)}"
+                            f"Lot: {lot}\n"
+                            f"Risk: {safe_round(total_risk)}\n"
+                            f"Yeni Bant: {safe_round(new_lower)} - {safe_round(new_upper)}"
                         )
                         st["alerted"] = "upper"
 
@@ -202,6 +223,7 @@ def home():
                 WATCHLIST[symbol]["lower"] = lower
                 WATCHLIST[symbol]["upper"] = upper
                 WATCHLIST[symbol]["alerted"] = None
+                WATCHLIST[symbol]["initialized"] = True
 
     with _state_lock:
         snapshot = {k: v.copy() for k, v in WATCHLIST.items()}
@@ -226,8 +248,8 @@ def home():
     <tr>
         <td>{{s}}</td>
         <td id="price-{{s}}">-</td>
-        <td>{{watchlist[s]["lower"]}}</td>
-        <td>{{watchlist[s]["upper"]}}</td>
+        <td id="lower-{{s}}">{{watchlist[s]["lower"]}}</td>
+        <td id="upper-{{s}}">{{watchlist[s]["upper"]}}</td>
         <td id="signal-{{s}}">-</td>
     </tr>
     {% endfor %}
@@ -253,6 +275,11 @@ def home():
                 d.prices[s]===null ? "Veri Yok" : d.prices[s];
             document.getElementById("signal-"+s).innerText =
                 d.signals[s];
+
+            if (d.watchlist && d.watchlist[s]) {
+                document.getElementById("lower-" + s).innerText = d.watchlist[s].lower;
+                document.getElementById("upper-" + s).innerText = d.watchlist[s].upper;
+            }
         }
     }
     setInterval(refresh,15000);

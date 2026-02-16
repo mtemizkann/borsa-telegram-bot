@@ -19,8 +19,11 @@ Required environment variables:
 - `TOKEN`
 - `CHAT_ID`
 - `CHECK_INTERVAL` (optional, default: `5`)
+- `BAND_SIZE_TL` (optional, default: `1`)
 
 Keep `RUN_MONITOR_IN_WEB=false` in web so only the worker sends alerts.
+
+If `RUN_MONITOR_IN_WEB=true`, bands are automatically recentered around the latest breakout price using `BAND_SIZE_TL`.
 
 ## Render deploy
 
