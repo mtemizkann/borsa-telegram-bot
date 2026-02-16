@@ -19,12 +19,15 @@ RUN_MONITOR_IN_WEB = os.environ.get("RUN_MONITOR_IN_WEB", "false").strip().lower
 ACCOUNT_SIZE = float(os.environ.get("ACCOUNT_SIZE", "150000").replace(",", "."))
 RISK_PERCENT = float(os.environ.get("RISK_PERCENT", "2").replace(",", "."))
 BAND_SIZE_TL = float(os.environ.get("BAND_SIZE_TL", "1").replace(",", "."))
+MIN_STOP_DISTANCE_TL = float(os.environ.get("MIN_STOP_DISTANCE_TL", "0.5").replace(",", "."))
+MAX_STOP_DISTANCE_TL = float(os.environ.get("MAX_STOP_DISTANCE_TL", "20").replace(",", "."))
+ALERT_COOLDOWN_SEC = int(float(os.environ.get("ALERT_COOLDOWN_SEC", "180").replace(",", ".")))
 
 # ================= STATE =================
 WATCHLIST: Dict[str, Dict[str, Any]] = {
-    "ASELS.IS": {"lower": 290.0, "upper": 310.0, "alerted": None, "initialized": False},
-    "TUPRS.IS": {"lower": 140.0, "upper": 170.0, "alerted": None, "initialized": False},
-    "FROTO.IS": {"lower": 850.0, "upper": 900.0, "alerted": None, "initialized": False},
+    "ASELS.IS": {"lower": 290.0, "upper": 310.0, "alerted": None, "initialized": False, "last_alert_at": 0.0},
+    "TUPRS.IS": {"lower": 140.0, "upper": 170.0, "alerted": None, "initialized": False, "last_alert_at": 0.0},
+    "FROTO.IS": {"lower": 850.0, "upper": 900.0, "alerted": None, "initialized": False, "last_alert_at": 0.0},
 }
 
 _TICKERS: Dict[str, yf.Ticker] = {}
@@ -99,6 +102,10 @@ def recenter_band(st: Dict[str, Any], center_price: float) -> Tuple[float, float
     st["upper"] = upper
     return lower, upper
 
+def stop_distance_allowed(entry: float, stop: float) -> bool:
+    distance = abs(entry - stop)
+    return MIN_STOP_DISTANCE_TL <= distance <= MAX_STOP_DISTANCE_TL
+
 def send_telegram(message: str) -> None:
     if not TOKEN or not CHAT_ID:
         return
@@ -132,6 +139,8 @@ def price_monitor_loop():
                     if not st:
                         continue
 
+                    st.setdefault("last_alert_at", 0.0)
+
                     if not st.get("initialized", False):
                         recenter_band(st, price)
                         st["alerted"] = None
@@ -144,9 +153,17 @@ def price_monitor_loop():
                     alerted = st.get("alerted")
 
                     if price <= lower and alerted != "lower":
+                        now_ts = time.time()
                         stop = upper
-                        lot, total_risk = calculate_position(price, stop)
                         new_lower, new_upper = recenter_band(st, price)
+                        st["alerted"] = "lower"
+
+                        if now_ts - float(st.get("last_alert_at", 0.0)) < ALERT_COOLDOWN_SEC:
+                            continue
+                        if not stop_distance_allowed(price, stop):
+                            continue
+
+                        lot, total_risk = calculate_position(price, stop)
                         send_telegram(
                             f"🟢 AL\n{symbol}\n"
                             f"Fiyat: {safe_round(price)}\n"
@@ -155,12 +172,20 @@ def price_monitor_loop():
                             f"Risk: {safe_round(total_risk)}\n"
                             f"Yeni Bant: {safe_round(new_lower)} - {safe_round(new_upper)}"
                         )
-                        st["alerted"] = "lower"
+                        st["last_alert_at"] = now_ts
 
                     elif price >= upper and alerted != "upper":
+                        now_ts = time.time()
                         stop = lower
-                        lot, total_risk = calculate_position(price, stop)
                         new_lower, new_upper = recenter_band(st, price)
+                        st["alerted"] = "upper"
+
+                        if now_ts - float(st.get("last_alert_at", 0.0)) < ALERT_COOLDOWN_SEC:
+                            continue
+                        if not stop_distance_allowed(price, stop):
+                            continue
+
+                        lot, total_risk = calculate_position(price, stop)
                         send_telegram(
                             f"🔴 SAT\n{symbol}\n"
                             f"Fiyat: {safe_round(price)}\n"
@@ -169,7 +194,7 @@ def price_monitor_loop():
                             f"Risk: {safe_round(total_risk)}\n"
                             f"Yeni Bant: {safe_round(new_lower)} - {safe_round(new_upper)}"
                         )
-                        st["alerted"] = "upper"
+                        st["last_alert_at"] = now_ts
 
                     elif lower < price < upper:
                         st["alerted"] = None
