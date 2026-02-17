@@ -94,6 +94,7 @@ TRAILING_STOP_PCT = _env_float("TRAILING_STOP_PCT", 1.2)
 AUTO_PRESET_BY_REGIME = os.environ.get("AUTO_PRESET_BY_REGIME", "true").strip().lower() == "true"
 DAILY_REPORT_HOUR = _env_int("DAILY_REPORT_HOUR", 18)
 ALLOW_DECISION_ALERTS_OUTSIDE_MARKET = os.environ.get("ALLOW_DECISION_ALERTS_OUTSIDE_MARKET", "false").strip().lower() == "true"
+STRICT_MARKET_HOURS = os.environ.get("STRICT_MARKET_HOURS", "true").strip().lower() == "true"
 
 EFFECTIVE_STRATEGY = {
     "preset": STRATEGY_PRESET,
@@ -117,6 +118,7 @@ EFFECTIVE_STRATEGY = {
     },
     "auto_preset_by_regime": AUTO_PRESET_BY_REGIME,
     "allow_decision_alerts_outside_market": ALLOW_DECISION_ALERTS_OUTSIDE_MARKET,
+    "strict_market_hours": STRICT_MARKET_HOURS,
 }
 
 # ================= STATE =================
@@ -1531,6 +1533,10 @@ def price_monitor_loop():
     while True:
         try:
             is_market_open = market_open()
+
+            if STRICT_MARKET_HOURS and not is_market_open:
+                time.sleep(60)
+                continue
 
             with _state_lock:
                 symbols = list(WATCHLIST.keys())

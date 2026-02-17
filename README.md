@@ -43,6 +43,7 @@ Required environment variables:
 - `AUTO_PRESET_BY_REGIME` (optional, default: `true`)
 - `DAILY_REPORT_HOUR` (optional, default: `18`)
 - `ALLOW_DECISION_ALERTS_OUTSIDE_MARKET` (optional, default: `false`)
+- `STRICT_MARKET_HOURS` (optional, default: `true`)
 
 Keep `RUN_MONITOR_IN_WEB=false` in web so only the worker sends alerts.
 
@@ -50,6 +51,7 @@ If `RUN_MONITOR_IN_WEB=true`, bands are automatically recentered around the late
 Alerts are rate-limited per symbol with `ALERT_COOLDOWN_SEC`, and alerts are skipped if stop distance is outside `MIN_STOP_DISTANCE_TL` and `MAX_STOP_DISTANCE_TL`.
 Decision Engine v3 uses weighted factors (technical + fundamental + news + market regime) and outputs `AL / BEKLE / SAT` with entry, stop, target, risk and confidence score.
 Market session checks run with Istanbul time (`Europe/Istanbul`).
+When `STRICT_MARKET_HOURS=true`, monitor logic and Telegram alerts run only during market hours.
 
 Strategy presets:
 - `AGRESIF`: lower AL threshold, more signals, faster decision alerts
