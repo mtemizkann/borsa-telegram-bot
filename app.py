@@ -110,7 +110,7 @@ def fetch_last_price(symbol: str) -> Optional[float]:
 def fetch_daily_history(symbol: str):
     try:
         t = get_ticker(symbol)
-        hist = t.history(period="9mo", interval="1d", actions=False, timeout=8)
+        hist = t.history(period="2y", interval="1d", actions=False, timeout=8)
         if hist is None or hist.empty:
             return None
         return hist.dropna(subset=["Close"])
@@ -134,7 +134,7 @@ def calculate_rsi(close_series, period: int = 14) -> Optional[float]:
 
 def evaluate_buy_setup(symbol: str, current_price: float) -> Optional[Dict[str, Any]]:
     hist = fetch_daily_history(symbol)
-    if hist is None or len(hist) < 210:
+    if hist is None or len(hist) < 205:
         return None
 
     close = hist["Close"]
@@ -336,8 +336,6 @@ def price_monitor_loop():
 
                 if should_refresh_analysis:
                     setup = evaluate_buy_setup(symbol, price)
-                    if setup is None:
-                        continue
 
                     send_setup = False
                     with _state_lock:
@@ -347,6 +345,9 @@ def price_monitor_loop():
 
                         st["buy_setup"] = setup
                         st["last_analysis_at"] = now_ts
+
+                        if setup is None:
+                            continue
 
                         if setup.get("eligible") and now_ts - float(st.get("last_setup_at", 0.0)) >= BUY_SETUP_COOLDOWN_SEC:
                             st["last_setup_at"] = now_ts
