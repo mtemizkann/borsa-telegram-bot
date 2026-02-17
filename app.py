@@ -1,10 +1,9 @@
 import os
-import json
 import time
 import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import yfinance as yf
@@ -23,9 +22,18 @@ BAND_SIZE_TL = float(os.environ.get("BAND_SIZE_TL", "1").replace(",", "."))
 MIN_STOP_DISTANCE_TL = float(os.environ.get("MIN_STOP_DISTANCE_TL", "0.5").replace(",", "."))
 MAX_STOP_DISTANCE_TL = float(os.environ.get("MAX_STOP_DISTANCE_TL", "20").replace(",", "."))
 ALERT_COOLDOWN_SEC = int(float(os.environ.get("ALERT_COOLDOWN_SEC", "180").replace(",", ".")))
-BUY_SCORE_THRESHOLD = int(float(os.environ.get("BUY_SCORE_THRESHOLD", "70").replace(",", ".")))
-BUY_SETUP_COOLDOWN_SEC = int(float(os.environ.get("BUY_SETUP_COOLDOWN_SEC", "3600").replace(",", ".")))
+
 ANALYSIS_REFRESH_SEC = int(float(os.environ.get("ANALYSIS_REFRESH_SEC", "300").replace(",", ".")))
+DECISION_ALERT_COOLDOWN_SEC = int(float(os.environ.get("DECISION_ALERT_COOLDOWN_SEC", "3600").replace(",", ".")))
+NEWS_LOOKBACK_HOURS = int(float(os.environ.get("NEWS_LOOKBACK_HOURS", "72").replace(",", ".")))
+
+AL_THRESHOLD = int(float(os.environ.get("AL_THRESHOLD", "72").replace(",", ".")))
+SAT_THRESHOLD = int(float(os.environ.get("SAT_THRESHOLD", "38").replace(",", ".")))
+
+TECH_WEIGHT = float(os.environ.get("TECH_WEIGHT", "0.45").replace(",", "."))
+FUND_WEIGHT = float(os.environ.get("FUND_WEIGHT", "0.25").replace(",", "."))
+NEWS_WEIGHT = float(os.environ.get("NEWS_WEIGHT", "0.20").replace(",", "."))
+REGIME_WEIGHT = float(os.environ.get("REGIME_WEIGHT", "0.10").replace(",", "."))
 
 # ================= STATE =================
 WATCHLIST: Dict[str, Dict[str, Any]] = {
@@ -35,9 +43,9 @@ WATCHLIST: Dict[str, Dict[str, Any]] = {
         "alerted": None,
         "initialized": False,
         "last_alert_at": 0.0,
-        "last_setup_at": 0.0,
         "last_analysis_at": 0.0,
-        "buy_setup": None,
+        "last_decision_alert_at": 0.0,
+        "decision": None,
     },
     "TUPRS.IS": {
         "lower": 140.0,
@@ -45,9 +53,9 @@ WATCHLIST: Dict[str, Dict[str, Any]] = {
         "alerted": None,
         "initialized": False,
         "last_alert_at": 0.0,
-        "last_setup_at": 0.0,
         "last_analysis_at": 0.0,
-        "buy_setup": None,
+        "last_decision_alert_at": 0.0,
+        "decision": None,
     },
     "FROTO.IS": {
         "lower": 850.0,
@@ -55,9 +63,9 @@ WATCHLIST: Dict[str, Dict[str, Any]] = {
         "alerted": None,
         "initialized": False,
         "last_alert_at": 0.0,
-        "last_setup_at": 0.0,
         "last_analysis_at": 0.0,
-        "buy_setup": None,
+        "last_decision_alert_at": 0.0,
+        "decision": None,
     },
 }
 
@@ -65,19 +73,10 @@ _TICKERS: Dict[str, yf.Ticker] = {}
 _state_lock = threading.Lock()
 _monitor_started = False
 _monitor_lock = threading.Lock()
+_regime_cache: Dict[str, Any] = {"score": 55.0, "reason": "Nötr", "updated_at": 0.0}
+
 
 # ================= HELPERS =================
-def tr_float(x: Any, default: Optional[float] = None) -> Optional[float]:
-    try:
-        if x is None:
-            return default
-        s = str(x).strip()
-        if not s:
-            return default
-        return float(s.replace(",", "."))
-    except Exception:
-        return default
-
 def safe_round(x: Any, ndigits: int = 2) -> Optional[float]:
     try:
         if x is None:
@@ -86,36 +85,56 @@ def safe_round(x: Any, ndigits: int = 2) -> Optional[float]:
     except Exception:
         return None
 
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def normalize_weights() -> Tuple[float, float, float, float]:
+    weights = [max(0.0, TECH_WEIGHT), max(0.0, FUND_WEIGHT), max(0.0, NEWS_WEIGHT), max(0.0, REGIME_WEIGHT)]
+    total = sum(weights)
+    if total <= 0:
+        return 0.45, 0.25, 0.20, 0.10
+    return (
+        weights[0] / total,
+        weights[1] / total,
+        weights[2] / total,
+        weights[3] / total,
+    )
+
+
 def market_open() -> bool:
     now = datetime.now(ZoneInfo("Europe/Istanbul"))
     if now.weekday() >= 5:
         return False
     return 9 <= now.hour < 18
 
+
 def get_ticker(symbol: str) -> yf.Ticker:
     if symbol not in _TICKERS:
         _TICKERS[symbol] = yf.Ticker(symbol)
     return _TICKERS[symbol]
 
+
 def fetch_last_price(symbol: str) -> Optional[float]:
     try:
-        t = get_ticker(symbol)
-        hist = t.history(period="1d", interval="1m", actions=False, timeout=5)
+        hist = get_ticker(symbol).history(period="1d", interval="1m", actions=False, timeout=5)
         if hist is None or hist.empty:
             return None
         return float(hist["Close"].iloc[-1])
     except Exception:
         return None
 
+
 def fetch_daily_history(symbol: str):
     try:
-        t = get_ticker(symbol)
-        hist = t.history(period="2y", interval="1d", actions=False, timeout=8)
+        hist = get_ticker(symbol).history(period="2y", interval="1d", actions=False, timeout=8)
         if hist is None or hist.empty:
             return None
-        return hist.dropna(subset=["Close"])
+        return hist.dropna(subset=["Close", "High", "Low"])
     except Exception:
         return None
+
 
 def calculate_rsi(close_series, period: int = 14) -> Optional[float]:
     if close_series is None or len(close_series) < period + 2:
@@ -132,88 +151,11 @@ def calculate_rsi(close_series, period: int = 14) -> Optional[float]:
     rs = last_gain / last_loss
     return float(100 - (100 / (1 + rs)))
 
-def evaluate_buy_setup(symbol: str, current_price: float) -> Optional[Dict[str, Any]]:
-    hist = fetch_daily_history(symbol)
-    if hist is None or len(hist) < 205:
-        return None
 
-    close = hist["Close"]
-    ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
-    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
-    ema200 = close.ewm(span=200, adjust=False).mean().iloc[-1]
-    rsi14 = calculate_rsi(close, 14)
-    atr20 = (hist["High"] - hist["Low"]).rolling(20).mean().iloc[-1]
-    breakout_level = hist["High"].tail(21).head(20).max()
+def stop_distance_allowed(entry: float, stop: float) -> bool:
+    distance = abs(entry - stop)
+    return MIN_STOP_DISTANCE_TL <= distance <= MAX_STOP_DISTANCE_TL
 
-    score = 0
-    reasons = []
-
-    if ema20 > ema50 > ema200:
-        score += 30
-        reasons.append("Trend yukari (EMA20>EMA50>EMA200)")
-
-    pullback_distance = abs(current_price - float(ema20)) / current_price
-    if pullback_distance <= 0.015:
-        score += 20
-        reasons.append("Fiyat EMA20'ye yakin")
-
-    if current_price > float(breakout_level):
-        score += 20
-        reasons.append("20 gunluk direnc ustu")
-
-    if rsi14 is not None and 45 <= rsi14 <= 65:
-        score += 15
-        reasons.append("RSI dengeli")
-    elif rsi14 is not None and 40 <= rsi14 <= 70:
-        score += 8
-        reasons.append("RSI kabul edilebilir")
-
-    if current_price > float(ema50):
-        score += 10
-        reasons.append("EMA50 uzeri")
-
-    atr = float(atr20) if atr20 is not None else 0.0
-    fallback_stop = current_price - max(BAND_SIZE_TL, 0.5)
-    stop = min(float(ema20), current_price - (1.2 * atr)) if atr > 0 else fallback_stop
-    stop = min(stop, current_price - 0.01)
-
-    if not stop_distance_allowed(current_price, stop):
-        return {
-            "symbol": symbol,
-            "score": score,
-            "eligible": False,
-            "reason": "Stop mesafesi filtre disi",
-        }
-
-    target1 = current_price + (2.0 * (current_price - stop))
-    target2 = current_price + (3.0 * (current_price - stop))
-
-    return {
-        "symbol": symbol,
-        "score": int(score),
-        "eligible": score >= BUY_SCORE_THRESHOLD,
-        "price": safe_round(current_price),
-        "entry_low": safe_round(current_price * 0.997),
-        "entry_high": safe_round(current_price * 1.003),
-        "stop": safe_round(stop),
-        "target1": safe_round(target1),
-        "target2": safe_round(target2),
-        "rr": safe_round((target1 - current_price) / max(current_price - stop, 0.01), 2),
-        "ema20": safe_round(ema20),
-        "ema50": safe_round(ema50),
-        "ema200": safe_round(ema200),
-        "rsi14": safe_round(rsi14),
-        "reasons": reasons[:4],
-    }
-
-def generate_signal(price: Optional[float], lower: float, upper: float) -> str:
-    if price is None:
-        return "VERİ YOK"
-    if price <= lower:
-        return "AL"
-    if price >= upper:
-        return "SAT"
-    return "BEKLE"
 
 def calculate_position(entry: float, stop: float) -> Tuple[int, float]:
     risk_amount = ACCOUNT_SIZE * (RISK_PERCENT / 100.0)
@@ -224,17 +166,6 @@ def calculate_position(entry: float, stop: float) -> Tuple[int, float]:
     total_risk = lot * per_share_risk
     return lot, total_risk
 
-def recenter_band(st: Dict[str, Any], center_price: float) -> Tuple[float, float]:
-    half_band = max(BAND_SIZE_TL, 0.01)
-    lower = round(center_price - half_band, 2)
-    upper = round(center_price + half_band, 2)
-    st["lower"] = lower
-    st["upper"] = upper
-    return lower, upper
-
-def stop_distance_allowed(entry: float, stop: float) -> bool:
-    distance = abs(entry - stop)
-    return MIN_STOP_DISTANCE_TL <= distance <= MAX_STOP_DISTANCE_TL
 
 def send_telegram(message: str) -> None:
     if not TOKEN or not CHAT_ID:
@@ -248,6 +179,397 @@ def send_telegram(message: str) -> None:
     except Exception:
         pass
 
+
+def recenter_band(st: Dict[str, Any], center_price: float) -> Tuple[float, float]:
+    half_band = max(BAND_SIZE_TL, 0.01)
+    lower = round(center_price - half_band, 2)
+    upper = round(center_price + half_band, 2)
+    st["lower"] = lower
+    st["upper"] = upper
+    return lower, upper
+
+
+def evaluate_technical(symbol: str, current_price: float) -> Optional[Dict[str, Any]]:
+    hist = fetch_daily_history(symbol)
+    if hist is None or len(hist) < 205:
+        return None
+
+    close = hist["Close"]
+    ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+    ema50 = float(close.ewm(span=50, adjust=False).mean().iloc[-1])
+    ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1])
+    rsi14 = calculate_rsi(close, 14)
+    atr20 = float((hist["High"] - hist["Low"]).rolling(20).mean().iloc[-1])
+    breakout_level = float(hist["High"].tail(21).head(20).max())
+
+    score = 0
+    reasons: List[str] = []
+
+    if ema20 > ema50 > ema200:
+        score += 35
+        reasons.append("Trend yukari")
+    elif ema20 < ema50 < ema200:
+        score += 5
+        reasons.append("Trend zayif/asagi")
+    else:
+        score += 18
+        reasons.append("Trend karisik")
+
+    if current_price > ema50:
+        score += 10
+        reasons.append("EMA50 uzeri")
+
+    pullback_distance = abs(current_price - ema20) / max(current_price, 1e-6)
+    if pullback_distance <= 0.015:
+        score += 15
+        reasons.append("EMA20'ye yakin")
+
+    if current_price > breakout_level:
+        score += 15
+        reasons.append("20 gun direnc ustu")
+
+    if rsi14 is not None:
+        if 48 <= rsi14 <= 62:
+            score += 12
+            reasons.append("RSI dengeli")
+        elif 40 <= rsi14 <= 70:
+            score += 6
+            reasons.append("RSI kabul edilebilir")
+
+    vol_ratio = atr20 / max(current_price, 1e-6)
+    if 0.008 <= vol_ratio <= 0.045:
+        score += 10
+        reasons.append("Volatilite uygun")
+
+    score = int(clamp(score, 0, 100))
+    long_stop = min(ema20, current_price - (1.2 * atr20))
+    long_stop = min(long_stop, current_price - 0.01)
+    short_stop = max(ema20, current_price + (1.2 * atr20))
+    short_stop = max(short_stop, current_price + 0.01)
+
+    return {
+        "score": score,
+        "ema20": safe_round(ema20),
+        "ema50": safe_round(ema50),
+        "ema200": safe_round(ema200),
+        "rsi14": safe_round(rsi14),
+        "atr20": safe_round(atr20),
+        "breakout_level": safe_round(breakout_level),
+        "stop_long": safe_round(long_stop),
+        "stop_short": safe_round(short_stop),
+        "reasons": reasons[:5],
+    }
+
+
+def evaluate_fundamental(symbol: str) -> Dict[str, Any]:
+    info = {}
+    try:
+        info = get_ticker(symbol).info or {}
+    except Exception:
+        info = {}
+
+    score = 50
+    reasons: List[str] = []
+
+    pe = info.get("forwardPE") or info.get("trailingPE")
+    pb = info.get("priceToBook")
+    roe = info.get("returnOnEquity")
+    debt_to_equity = info.get("debtToEquity")
+    revenue_growth = info.get("revenueGrowth")
+    earnings_growth = info.get("earningsGrowth")
+    margin = info.get("profitMargins")
+
+    if pe is not None:
+        if 0 < pe < 12:
+            score += 12
+            reasons.append("F/K makul")
+        elif pe > 30:
+            score -= 10
+            reasons.append("F/K yuksek")
+
+    if pb is not None:
+        if 0 < pb < 2.5:
+            score += 8
+            reasons.append("PD/DD dengeli")
+        elif pb > 6:
+            score -= 8
+            reasons.append("PD/DD yuksek")
+
+    if roe is not None:
+        roe_pct = roe * 100 if roe < 3 else roe
+        if roe_pct >= 18:
+            score += 10
+            reasons.append("ROE guclu")
+        elif roe_pct < 8:
+            score -= 8
+            reasons.append("ROE zayif")
+
+    if debt_to_equity is not None:
+        if debt_to_equity < 80:
+            score += 8
+            reasons.append("Borc seviyesi makul")
+        elif debt_to_equity > 250:
+            score -= 10
+            reasons.append("Borc seviyesi yuksek")
+
+    if revenue_growth is not None:
+        if revenue_growth > 0.10:
+            score += 8
+            reasons.append("Gelir buyumesi pozitif")
+        elif revenue_growth < 0:
+            score -= 8
+            reasons.append("Gelir daralmasi")
+
+    if earnings_growth is not None:
+        if earnings_growth > 0.10:
+            score += 8
+            reasons.append("Kar buyumesi pozitif")
+        elif earnings_growth < 0:
+            score -= 8
+            reasons.append("Kar daralmasi")
+
+    if margin is not None:
+        if margin > 0.12:
+            score += 6
+            reasons.append("Marj guclu")
+        elif margin < 0.03:
+            score -= 6
+            reasons.append("Marj zayif")
+
+    return {
+        "score": int(clamp(score, 0, 100)),
+        "reasons": reasons[:5],
+        "pe": safe_round(pe),
+        "pb": safe_round(pb),
+        "roe": safe_round(roe),
+        "debt_to_equity": safe_round(debt_to_equity),
+    }
+
+
+def evaluate_news(symbol: str) -> Dict[str, Any]:
+    score = 50
+    reasons: List[str] = []
+    now_ts = time.time()
+    lookback_sec = NEWS_LOOKBACK_HOURS * 3600
+
+    positive_keywords = [
+        "ihale", "sozlesme", "sözleşme", "onay", "temettu", "temettu", "geri alim", "geri alım",
+        "buyback", "new order", "approval", "upgrade", "capacity", "yatirim", "yatırım", "kar artisi",
+    ]
+    negative_keywords = [
+        "ceza", "dava", "zarar", "sorusturma", "soruşturma", "downgrade", "risk", "iptal",
+        "cancel", "default", "iflas", "borc", "borç", "satış baskisi", "satis baskisi",
+    ]
+
+    try:
+        news_items = get_ticker(symbol).news or []
+    except Exception:
+        news_items = []
+
+    recent_titles: List[str] = []
+    for item in news_items[:20]:
+        ts = item.get("providerPublishTime")
+        if ts is None:
+            continue
+        if now_ts - float(ts) > lookback_sec:
+            continue
+        title = (item.get("title") or "").strip().lower()
+        if title:
+            recent_titles.append(title)
+
+    if not recent_titles:
+        reasons.append("Son haber etkisi notr")
+        return {"score": score, "reasons": reasons}
+
+    pos_hits = 0
+    neg_hits = 0
+    for title in recent_titles:
+        if any(k in title for k in positive_keywords):
+            pos_hits += 1
+        if any(k in title for k in negative_keywords):
+            neg_hits += 1
+
+    score += min(30, pos_hits * 8)
+    score -= min(30, neg_hits * 8)
+
+    if pos_hits > 0:
+        reasons.append("Pozitif haber/katalizor var")
+    if neg_hits > 0:
+        reasons.append("Negatif haber riski var")
+    if pos_hits == 0 and neg_hits == 0:
+        reasons.append("Haber etkisi dengeli")
+
+    return {"score": int(clamp(score, 0, 100)), "reasons": reasons[:3]}
+
+
+def evaluate_market_regime() -> Dict[str, Any]:
+    now_ts = time.time()
+    if now_ts - float(_regime_cache.get("updated_at", 0.0)) < ANALYSIS_REFRESH_SEC:
+        return _regime_cache
+
+    symbols = ["XU100.IS", "^XU100", "XU030.IS"]
+    for regime_symbol in symbols:
+        try:
+            hist = yf.Ticker(regime_symbol).history(period="1y", interval="1d", actions=False, timeout=8)
+            if hist is None or hist.empty or len(hist) < 60:
+                continue
+
+            close = hist["Close"]
+            ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+            ema50 = float(close.ewm(span=50, adjust=False).mean().iloc[-1])
+            last_close = float(close.iloc[-1])
+
+            if last_close > ema20 > ema50:
+                score, reason = 80.0, "Piyasa rejimi pozitif"
+            elif last_close > ema50:
+                score, reason = 62.0, "Piyasa rejimi dengeli"
+            elif ema20 < ema50:
+                score, reason = 35.0, "Piyasa rejimi zayif"
+            else:
+                score, reason = 50.0, "Piyasa rejimi notr"
+
+            _regime_cache.update({
+                "score": score,
+                "reason": reason,
+                "symbol": regime_symbol,
+                "updated_at": now_ts,
+            })
+            return _regime_cache
+        except Exception:
+            continue
+
+    _regime_cache.update({"score": 55.0, "reason": "Piyasa rejimi varsayilan notr", "updated_at": now_ts})
+    return _regime_cache
+
+
+def build_decision(symbol: str, current_price: float) -> Optional[Dict[str, Any]]:
+    technical = evaluate_technical(symbol, current_price)
+    if technical is None:
+        return None
+
+    fundamental = evaluate_fundamental(symbol)
+    news = evaluate_news(symbol)
+    regime = evaluate_market_regime()
+
+    w_tech, w_fund, w_news, w_regime = normalize_weights()
+    total_score = (
+        technical["score"] * w_tech
+        + fundamental["score"] * w_fund
+        + news["score"] * w_news
+        + regime["score"] * w_regime
+    )
+    total_score = int(round(clamp(total_score, 0, 100)))
+
+    if total_score >= AL_THRESHOLD and technical["score"] >= 60 and regime["score"] >= 50:
+        action = "AL"
+    elif total_score <= SAT_THRESHOLD or (technical["score"] <= 35 and regime["score"] < 45):
+        action = "SAT"
+    else:
+        action = "BEKLE"
+
+    entry_mid = current_price
+    entry_low = current_price * 0.997
+    entry_high = current_price * 1.003
+    stop = None
+    target1 = None
+    target2 = None
+    lot = None
+    total_risk = None
+    rr = None
+
+    if action == "AL":
+        stop = float(technical["stop_long"])
+        if not stop_distance_allowed(entry_mid, stop):
+            action = "BEKLE"
+        else:
+            risk_per_share = entry_mid - stop
+            target1 = entry_mid + (2 * risk_per_share)
+            target2 = entry_mid + (3 * risk_per_share)
+            lot, total_risk = calculate_position(entry_mid, stop)
+            rr = 2.0
+
+    elif action == "SAT":
+        stop = float(technical["stop_short"])
+        if not stop_distance_allowed(entry_mid, stop):
+            action = "BEKLE"
+        else:
+            risk_per_share = stop - entry_mid
+            target1 = entry_mid - (2 * risk_per_share)
+            target2 = entry_mid - (3 * risk_per_share)
+            lot, total_risk = calculate_position(entry_mid, stop)
+            rr = 2.0
+
+    reasons: List[str] = []
+    reasons.extend(technical.get("reasons", [])[:2])
+    reasons.extend(fundamental.get("reasons", [])[:2])
+    reasons.extend(news.get("reasons", [])[:1])
+    reasons.append(regime.get("reason", ""))
+    reasons = [r for r in reasons if r][:5]
+
+    return {
+        "symbol": symbol,
+        "action": action,
+        "score": total_score,
+        "entry_low": safe_round(entry_low),
+        "entry_high": safe_round(entry_high),
+        "stop": safe_round(stop),
+        "target1": safe_round(target1),
+        "target2": safe_round(target2),
+        "rr": safe_round(rr),
+        "lot": lot,
+        "risk": safe_round(total_risk),
+        "reasons": reasons,
+        "factors": {
+            "technical": technical["score"],
+            "fundamental": fundamental["score"],
+            "news": news["score"],
+            "regime": safe_round(regime["score"]),
+        },
+        "indicators": {
+            "ema20": technical.get("ema20"),
+            "ema50": technical.get("ema50"),
+            "ema200": technical.get("ema200"),
+            "rsi14": technical.get("rsi14"),
+        },
+    }
+
+
+def format_decision_message(decision: Dict[str, Any]) -> str:
+    lines = [
+        f"🧭 KARAR {decision.get('action')}",
+        decision.get("symbol", ""),
+        f"Guven: {decision.get('score')}/100",
+    ]
+
+    if decision.get("entry_low") is not None and decision.get("entry_high") is not None:
+        lines.append(f"Giris: {decision.get('entry_low')} - {decision.get('entry_high')}")
+    if decision.get("stop") is not None:
+        lines.append(f"Stop: {decision.get('stop')}")
+    if decision.get("target1") is not None:
+        lines.append(f"Hedef1: {decision.get('target1')}")
+    if decision.get("target2") is not None:
+        lines.append(f"Hedef2: {decision.get('target2')}")
+    if decision.get("rr") is not None:
+        lines.append(f"R/R: {decision.get('rr')}")
+
+    factors = decision.get("factors", {})
+    if factors:
+        lines.append(
+            "Faktorler: "
+            f"T{factors.get('technical')} "
+            f"F{factors.get('fundamental')} "
+            f"N{factors.get('news')} "
+            f"R{factors.get('regime')}"
+        )
+
+    reasons = decision.get("reasons", [])
+    if reasons:
+        lines.append("Nedenler:")
+        lines.extend([f"- {r}" for r in reasons])
+
+    return "\n".join(lines)
+
+
 # ================= MONITOR =================
 def price_monitor_loop():
     while True:
@@ -255,9 +577,9 @@ def price_monitor_loop():
             is_market_open = market_open()
 
             with _state_lock:
-                snapshot = {k: v.copy() for k, v in WATCHLIST.items()}
+                symbols = list(WATCHLIST.keys())
 
-            for symbol in snapshot.keys():
+            for symbol in symbols:
                 price = fetch_last_price(symbol)
                 if price is None:
                     continue
@@ -271,8 +593,8 @@ def price_monitor_loop():
                         continue
 
                     st.setdefault("last_alert_at", 0.0)
-                    st.setdefault("last_setup_at", 0.0)
                     st.setdefault("last_analysis_at", 0.0)
+                    st.setdefault("last_decision_alert_at", 0.0)
 
                     if not st.get("initialized", False):
                         recenter_band(st, price)
@@ -284,93 +606,77 @@ def price_monitor_loop():
 
                     lower = float(st["lower"])
                     upper = float(st["upper"])
-
                     alerted = st.get("alerted")
 
                     if is_market_open and price <= lower and alerted != "lower":
-                        now_ts = time.time()
                         stop = upper
                         new_lower, new_upper = recenter_band(st, price)
                         st["alerted"] = "lower"
 
-                        if now_ts - float(st.get("last_alert_at", 0.0)) < ALERT_COOLDOWN_SEC:
-                            continue
-                        if not stop_distance_allowed(price, stop):
-                            continue
-
-                        lot, total_risk = calculate_position(price, stop)
-                        send_telegram(
-                            f"🟢 AL\n{symbol}\n"
-                            f"Fiyat: {safe_round(price)}\n"
-                            f"Stop: {safe_round(stop)}\n"
-                            f"Lot: {lot}\n"
-                            f"Risk: {safe_round(total_risk)}\n"
-                            f"Yeni Bant: {safe_round(new_lower)} - {safe_round(new_upper)}"
-                        )
-                        st["last_alert_at"] = now_ts
+                        if now_ts - float(st.get("last_alert_at", 0.0)) >= ALERT_COOLDOWN_SEC and stop_distance_allowed(price, stop):
+                            lot, total_risk = calculate_position(price, stop)
+                            send_telegram(
+                                f"🟢 AL\n{symbol}\n"
+                                f"Fiyat: {safe_round(price)}\n"
+                                f"Stop: {safe_round(stop)}\n"
+                                f"Lot: {lot}\n"
+                                f"Risk: {safe_round(total_risk)}\n"
+                                f"Yeni Bant: {safe_round(new_lower)} - {safe_round(new_upper)}"
+                            )
+                            st["last_alert_at"] = now_ts
 
                     elif is_market_open and price >= upper and alerted != "upper":
-                        now_ts = time.time()
                         stop = lower
                         new_lower, new_upper = recenter_band(st, price)
                         st["alerted"] = "upper"
 
-                        if now_ts - float(st.get("last_alert_at", 0.0)) < ALERT_COOLDOWN_SEC:
-                            continue
-                        if not stop_distance_allowed(price, stop):
-                            continue
-
-                        lot, total_risk = calculate_position(price, stop)
-                        send_telegram(
-                            f"🔴 SAT\n{symbol}\n"
-                            f"Fiyat: {safe_round(price)}\n"
-                            f"Stop: {safe_round(stop)}\n"
-                            f"Lot: {lot}\n"
-                            f"Risk: {safe_round(total_risk)}\n"
-                            f"Yeni Bant: {safe_round(new_lower)} - {safe_round(new_upper)}"
-                        )
-                        st["last_alert_at"] = now_ts
+                        if now_ts - float(st.get("last_alert_at", 0.0)) >= ALERT_COOLDOWN_SEC and stop_distance_allowed(price, stop):
+                            lot, total_risk = calculate_position(price, stop)
+                            send_telegram(
+                                f"🔴 SAT\n{symbol}\n"
+                                f"Fiyat: {safe_round(price)}\n"
+                                f"Stop: {safe_round(stop)}\n"
+                                f"Lot: {lot}\n"
+                                f"Risk: {safe_round(total_risk)}\n"
+                                f"Yeni Bant: {safe_round(new_lower)} - {safe_round(new_upper)}"
+                            )
+                            st["last_alert_at"] = now_ts
 
                     elif is_market_open and lower < price < upper:
                         st["alerted"] = None
 
                 if should_refresh_analysis:
-                    setup = evaluate_buy_setup(symbol, price)
+                    decision = build_decision(symbol, price)
+                    if decision is None:
+                        continue
 
-                    send_setup = False
+                    send_decision = False
                     with _state_lock:
                         st = WATCHLIST.get(symbol)
                         if not st:
                             continue
 
-                        st["buy_setup"] = setup
+                        prev_decision = st.get("decision") or {}
+                        prev_action = prev_decision.get("action")
+                        st["decision"] = decision
                         st["last_analysis_at"] = now_ts
 
-                        if setup is None:
-                            continue
+                        action_changed = decision.get("action") != prev_action
+                        decision_is_actionable = decision.get("action") in {"AL", "SAT"}
+                        cooldown_done = now_ts - float(st.get("last_decision_alert_at", 0.0)) >= DECISION_ALERT_COOLDOWN_SEC
 
-                        if setup.get("eligible") and now_ts - float(st.get("last_setup_at", 0.0)) >= BUY_SETUP_COOLDOWN_SEC:
-                            st["last_setup_at"] = now_ts
-                            send_setup = True
+                        if action_changed and decision_is_actionable and cooldown_done:
+                            st["last_decision_alert_at"] = now_ts
+                            send_decision = True
 
-                    if send_setup:
-                        reasons = setup.get("reasons", [])
-                        reason_text = "\n".join([f"- {r}" for r in reasons]) if reasons else "- Sinyal kriterleri saglandi"
-                        send_telegram(
-                            f"📈 ALIM ADAYI\n{symbol}\n"
-                            f"Skor: {setup.get('score')}/100\n"
-                            f"Giris: {setup.get('entry_low')} - {setup.get('entry_high')}\n"
-                            f"Stop: {setup.get('stop')}\n"
-                            f"Hedef1: {setup.get('target1')}\n"
-                            f"Hedef2: {setup.get('target2')}\n"
-                            f"R/R: {setup.get('rr')}\n"
-                            f"Nedenler:\n{reason_text}"
-                        )
+                    if send_decision:
+                        send_telegram(format_decision_message(decision))
 
             time.sleep(30 if is_market_open else 60)
 
         except Exception:
             time.sleep(10)
+
 
 def ensure_monitor_started():
     global _monitor_started
@@ -382,10 +688,12 @@ def ensure_monitor_started():
         threading.Thread(target=price_monitor_loop, daemon=True).start()
         _monitor_started = True
 
+
 @app.before_request
 def start_monitor_once():
     if RUN_MONITOR_IN_WEB:
         ensure_monitor_started()
+
 
 # ================= API =================
 @app.route("/api/data", methods=["GET"])
@@ -394,24 +702,46 @@ def api_data():
         snapshot = {k: v.copy() for k, v in WATCHLIST.items()}
 
     prices = {}
-    signals = {}
-    buy_setups = {}
+    band_signals = {}
+    decisions = {}
 
     for s, d in snapshot.items():
         p = fetch_last_price(s)
         prices[s] = safe_round(p)
-        signals[s] = generate_signal(p, float(d["lower"]), float(d["upper"]))
-        buy_setups[s] = d.get("buy_setup")
 
-    return jsonify({"prices": prices, "watchlist": snapshot, "signals": signals, "buy_setups": buy_setups})
+        if p is None:
+            band_signals[s] = "VERI YOK"
+        elif p <= float(d["lower"]):
+            band_signals[s] = "AL"
+        elif p >= float(d["upper"]):
+            band_signals[s] = "SAT"
+        else:
+            band_signals[s] = "BEKLE"
+
+        decisions[s] = d.get("decision")
+
+    return jsonify({
+        "prices": prices,
+        "watchlist": snapshot,
+        "band_signals": band_signals,
+        "decisions": decisions,
+    })
+
 
 # ================= PANEL =================
 @app.route("/", methods=["GET", "POST"])
 def home():
     if request.method == "POST":
         symbol = request.form.get("symbol")
-        lower = tr_float(request.form.get("lower"))
-        upper = tr_float(request.form.get("upper"))
+        lower_raw = (request.form.get("lower") or "").strip().replace(",", ".")
+        upper_raw = (request.form.get("upper") or "").strip().replace(",", ".")
+
+        try:
+            lower = float(lower_raw)
+            upper = float(upper_raw)
+        except Exception:
+            lower = None
+            upper = None
 
         if symbol in WATCHLIST and lower is not None and upper is not None:
             with _state_lock:
@@ -426,19 +756,20 @@ def home():
     html = """
     <html>
     <head>
-    <title>BIST Professional Alarm Panel</title>
+    <title>BIST Decision Panel v3</title>
     </head>
     <body>
-    <h1>BIST Alarm Panel</h1>
+    <h1>BIST Alarm + Karar Paneli (v3)</h1>
 
     <table border="1" cellpadding="10">
     <tr>
         <th>Hisse</th>
         <th>Fiyat</th>
         <th>Alt</th>
-        <th>Üst</th>
-        <th>Sinyal</th>
-        <th>Alim Skoru</th>
+        <th>Ust</th>
+        <th>Bant</th>
+        <th>Karar</th>
+        <th>Guven</th>
     </tr>
     {% for s in watchlist %}
     <tr>
@@ -446,8 +777,9 @@ def home():
         <td id="price-{{s}}">-</td>
         <td id="lower-{{s}}">{{watchlist[s]["lower"]}}</td>
         <td id="upper-{{s}}">{{watchlist[s]["upper"]}}</td>
-        <td id="signal-{{s}}">-</td>
-        <td id="buy-score-{{s}}">-</td>
+        <td id="band-{{s}}">-</td>
+        <td id="decision-{{s}}">-</td>
+        <td id="score-{{s}}">-</td>
     </tr>
     {% endfor %}
     </table>
@@ -459,8 +791,8 @@ def home():
     {% endfor %}
     </select>
     <input name="lower" placeholder="Alt Limit">
-    <input name="upper" placeholder="Üst Limit">
-    <button type="submit">Güncelle</button>
+    <input name="upper" placeholder="Ust Limit">
+    <button type="submit">Guncelle</button>
     </form>
 
     <script>
@@ -470,15 +802,15 @@ def home():
         for(const s in d.prices){
             document.getElementById("price-"+s).innerText =
                 d.prices[s]===null ? "Veri Yok" : d.prices[s];
-            document.getElementById("signal-"+s).innerText =
-                d.signals[s];
+            document.getElementById("band-"+s).innerText = d.band_signals[s] || "-";
 
-            const setup = d.buy_setups && d.buy_setups[s] ? d.buy_setups[s] : null;
-            if (setup && typeof setup.score !== "undefined") {
-                const mark = setup.eligible ? "✅" : "•";
-                document.getElementById("buy-score-" + s).innerText = mark + " " + setup.score;
+            const decision = d.decisions && d.decisions[s] ? d.decisions[s] : null;
+            if (decision) {
+                document.getElementById("decision-"+s).innerText = decision.action || "-";
+                document.getElementById("score-"+s).innerText = (decision.score ?? "-") + "/100";
             } else {
-                document.getElementById("buy-score-" + s).innerText = "-";
+                document.getElementById("decision-"+s).innerText = "-";
+                document.getElementById("score-"+s).innerText = "-";
             }
 
             if (d.watchlist && d.watchlist[s]) {
@@ -487,7 +819,7 @@ def home():
             }
         }
     }
-    setInterval(refresh,15000);
+    setInterval(refresh, 15000);
     refresh();
     </script>
 
@@ -496,6 +828,7 @@ def home():
     """
 
     return render_template_string(html, watchlist=snapshot)
+
 
 if __name__ == "__main__":
     if RUN_MONITOR_IN_WEB:

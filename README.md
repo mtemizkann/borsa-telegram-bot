@@ -23,16 +23,26 @@ Required environment variables:
 - `MIN_STOP_DISTANCE_TL` (optional, default: `0.5`)
 - `MAX_STOP_DISTANCE_TL` (optional, default: `20`)
 - `ALERT_COOLDOWN_SEC` (optional, default: `180`)
-- `BUY_SCORE_THRESHOLD` (optional, default: `70`)
-- `BUY_SETUP_COOLDOWN_SEC` (optional, default: `3600`)
 - `ANALYSIS_REFRESH_SEC` (optional, default: `300`)
+- `DECISION_ALERT_COOLDOWN_SEC` (optional, default: `3600`)
+- `NEWS_LOOKBACK_HOURS` (optional, default: `72`)
+- `AL_THRESHOLD` (optional, default: `72`)
+- `SAT_THRESHOLD` (optional, default: `38`)
+- `TECH_WEIGHT` (optional, default: `0.45`)
+- `FUND_WEIGHT` (optional, default: `0.25`)
+- `NEWS_WEIGHT` (optional, default: `0.20`)
+- `REGIME_WEIGHT` (optional, default: `0.10`)
 
 Keep `RUN_MONITOR_IN_WEB=false` in web so only the worker sends alerts.
 
 If `RUN_MONITOR_IN_WEB=true`, bands are automatically recentered around the latest breakout price using `BAND_SIZE_TL`.
 Alerts are rate-limited per symbol with `ALERT_COOLDOWN_SEC`, and alerts are skipped if stop distance is outside `MIN_STOP_DISTANCE_TL` and `MAX_STOP_DISTANCE_TL`.
-Buy-candidate alerts are scored with trend/pullback/breakout/RSI checks and sent only when score is above `BUY_SCORE_THRESHOLD`.
-Market session checks run with Istanbul time (`Europe/Istanbul`), while buy-setup analysis keeps refreshing even when the market is closed.
+Decision Engine v3 uses weighted factors (technical + fundamental + news + market regime) and outputs `AL / BEKLE / SAT` with entry, stop, target, risk and confidence score.
+Market session checks run with Istanbul time (`Europe/Istanbul`).
+
+Limitations (free data):
+- No live orderbook/kademe depth (free sources are limited)
+- News/KAP effect is keyword-based and should be treated as decision support, not certainty
 
 ## Render deploy
 
