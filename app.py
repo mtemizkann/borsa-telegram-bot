@@ -34,6 +34,8 @@ TECH_WEIGHT = float(os.environ.get("TECH_WEIGHT", "0.45").replace(",", "."))
 FUND_WEIGHT = float(os.environ.get("FUND_WEIGHT", "0.25").replace(",", "."))
 NEWS_WEIGHT = float(os.environ.get("NEWS_WEIGHT", "0.20").replace(",", "."))
 REGIME_WEIGHT = float(os.environ.get("REGIME_WEIGHT", "0.10").replace(",", "."))
+BACKTEST_INITIAL_CAPITAL = float(os.environ.get("BACKTEST_INITIAL_CAPITAL", "100000").replace(",", "."))
+DECISION_LOG_LIMIT = int(float(os.environ.get("DECISION_LOG_LIMIT", "200").replace(",", ".")))
 
 # ================= STATE =================
 WATCHLIST: Dict[str, Dict[str, Any]] = {
@@ -46,6 +48,7 @@ WATCHLIST: Dict[str, Dict[str, Any]] = {
         "last_analysis_at": 0.0,
         "last_decision_alert_at": 0.0,
         "decision": None,
+        "decision_log": [],
     },
     "TUPRS.IS": {
         "lower": 140.0,
@@ -56,6 +59,7 @@ WATCHLIST: Dict[str, Dict[str, Any]] = {
         "last_analysis_at": 0.0,
         "last_decision_alert_at": 0.0,
         "decision": None,
+        "decision_log": [],
     },
     "FROTO.IS": {
         "lower": 850.0,
@@ -66,6 +70,7 @@ WATCHLIST: Dict[str, Dict[str, Any]] = {
         "last_analysis_at": 0.0,
         "last_decision_alert_at": 0.0,
         "decision": None,
+        "decision_log": [],
     },
 }
 
@@ -187,6 +192,29 @@ def recenter_band(st: Dict[str, Any], center_price: float) -> Tuple[float, float
     st["lower"] = lower
     st["upper"] = upper
     return lower, upper
+
+
+def append_decision_log(st: Dict[str, Any], symbol: str, decision: Dict[str, Any], price: float, ts: float) -> None:
+    logs = st.setdefault("decision_log", [])
+    logs.append(
+        {
+            "ts": ts,
+            "time": datetime.fromtimestamp(ts, ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S"),
+            "symbol": symbol,
+            "price": safe_round(price),
+            "action": decision.get("action"),
+            "score": decision.get("score"),
+            "entry_low": decision.get("entry_low"),
+            "entry_high": decision.get("entry_high"),
+            "stop": decision.get("stop"),
+            "target1": decision.get("target1"),
+            "target2": decision.get("target2"),
+            "factors": decision.get("factors"),
+            "reasons": decision.get("reasons"),
+        }
+    )
+    if len(logs) > DECISION_LOG_LIMIT:
+        del logs[: len(logs) - DECISION_LOG_LIMIT]
 
 
 def evaluate_technical(symbol: str, current_price: float) -> Optional[Dict[str, Any]]:
@@ -442,6 +470,213 @@ def evaluate_market_regime() -> Dict[str, Any]:
     return _regime_cache
 
 
+def _regime_series_for_backtest(length: int):
+    try:
+        idx = yf.Ticker("^XU100").history(period="2y", interval="1d", actions=False, timeout=8)
+        if idx is None or idx.empty or len(idx) < 80:
+            return [55.0] * length
+        idx_close = idx["Close"]
+        idx_ema20 = idx_close.ewm(span=20, adjust=False).mean()
+        idx_ema50 = idx_close.ewm(span=50, adjust=False).mean()
+
+        scores = []
+        for c, e20, e50 in zip(idx_close.tail(length), idx_ema20.tail(length), idx_ema50.tail(length)):
+            if c > e20 > e50:
+                scores.append(80.0)
+            elif c > e50:
+                scores.append(62.0)
+            elif e20 < e50:
+                scores.append(35.0)
+            else:
+                scores.append(50.0)
+        if len(scores) < length:
+            return [55.0] * (length - len(scores)) + scores
+        return scores
+    except Exception:
+        return [55.0] * length
+
+
+def run_backtest(symbol: str, days: int, initial_capital: float) -> Dict[str, Any]:
+    hist = fetch_daily_history(symbol)
+    if hist is None or len(hist) < 260:
+        return {"error": "Not enough historical data"}
+
+    days = int(clamp(days, 180, 730))
+    data = hist.tail(days + 220).copy()
+    close = data["Close"]
+    high = data["High"]
+    low = data["Low"]
+
+    data["ema20"] = close.ewm(span=20, adjust=False).mean()
+    data["ema50"] = close.ewm(span=50, adjust=False).mean()
+    data["ema200"] = close.ewm(span=200, adjust=False).mean()
+    data["atr20"] = (high - low).rolling(20).mean()
+    data["rsi14"] = (100 - (100 / (1 + (
+        close.diff().clip(lower=0).ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+        / ((-close.diff().clip(upper=0)).ewm(alpha=1 / 14, min_periods=14, adjust=False).mean().replace(0, 1e-9))
+    ))))
+    data["breakout"] = high.rolling(20).max().shift(1)
+
+    data = data.dropna().tail(days)
+    if data.empty:
+        return {"error": "Not enough calculated bars"}
+
+    regime_scores = _regime_series_for_backtest(len(data))
+    w_tech, w_fund, w_news, w_regime = normalize_weights()
+
+    equity = float(initial_capital)
+    peak = equity
+    max_dd = 0.0
+    trades: List[Dict[str, Any]] = []
+    decision_counts = {"AL": 0, "BEKLE": 0, "SAT": 0}
+
+    position = None
+
+    for i, (idx, row) in enumerate(data.iterrows()):
+        price = float(row["Close"])
+        ema20 = float(row["ema20"])
+        ema50 = float(row["ema50"])
+        ema200 = float(row["ema200"])
+        rsi14 = float(row["rsi14"])
+        atr20 = float(row["atr20"])
+        breakout = float(row["breakout"])
+
+        tech_score = 0
+        if ema20 > ema50 > ema200:
+            tech_score += 35
+        elif ema20 < ema50 < ema200:
+            tech_score += 5
+        else:
+            tech_score += 18
+        if price > ema50:
+            tech_score += 10
+        if abs(price - ema20) / max(price, 1e-6) <= 0.015:
+            tech_score += 15
+        if price > breakout:
+            tech_score += 15
+        if 48 <= rsi14 <= 62:
+            tech_score += 12
+        elif 40 <= rsi14 <= 70:
+            tech_score += 6
+        if 0.008 <= (atr20 / max(price, 1e-6)) <= 0.045:
+            tech_score += 10
+        tech_score = clamp(tech_score, 0, 100)
+
+        regime_score = float(regime_scores[i])
+        total_score = (
+            tech_score * w_tech
+            + 50.0 * w_fund
+            + 50.0 * w_news
+            + regime_score * w_regime
+        )
+
+        if total_score >= AL_THRESHOLD and tech_score >= 60 and regime_score >= 50:
+            action = "AL"
+        elif total_score <= SAT_THRESHOLD or (tech_score <= 35 and regime_score < 45):
+            action = "SAT"
+        else:
+            action = "BEKLE"
+        decision_counts[action] += 1
+
+        if position is None and action == "AL":
+            stop = min(ema20, price - (1.2 * atr20))
+            stop = min(stop, price - 0.01)
+            if stop_distance_allowed(price, stop):
+                risk_per_share = price - stop
+                lot = int((equity * (RISK_PERCENT / 100.0)) / max(risk_per_share, 1e-6))
+                if lot > 0:
+                    position = {
+                        "entry_price": price,
+                        "entry_date": str(idx.date()),
+                        "stop": stop,
+                        "target": price + (2 * risk_per_share),
+                        "lot": lot,
+                    }
+        elif position is not None:
+            exit_reason = None
+            exit_price = None
+            if float(row["Low"]) <= position["stop"]:
+                exit_price = position["stop"]
+                exit_reason = "STOP"
+            elif float(row["High"]) >= position["target"]:
+                exit_price = position["target"]
+                exit_reason = "TARGET"
+            elif action == "SAT":
+                exit_price = price
+                exit_reason = "SAT_SIGNAL"
+
+            if exit_price is not None:
+                pnl = (exit_price - position["entry_price"]) * position["lot"]
+                trade_ret_pct = ((exit_price / position["entry_price"]) - 1.0) * 100.0
+                equity += pnl
+                trades.append(
+                    {
+                        "entry_date": position["entry_date"],
+                        "exit_date": str(idx.date()),
+                        "entry": safe_round(position["entry_price"]),
+                        "exit": safe_round(exit_price),
+                        "lot": position["lot"],
+                        "pnl": safe_round(pnl),
+                        "return_pct": safe_round(trade_ret_pct),
+                        "reason": exit_reason,
+                    }
+                )
+                position = None
+
+        peak = max(peak, equity)
+        dd = ((peak - equity) / max(peak, 1e-6)) * 100.0
+        max_dd = max(max_dd, dd)
+
+    if position is not None:
+        last_price = float(data["Close"].iloc[-1])
+        pnl = (last_price - position["entry_price"]) * position["lot"]
+        trade_ret_pct = ((last_price / position["entry_price"]) - 1.0) * 100.0
+        equity += pnl
+        trades.append(
+            {
+                "entry_date": position["entry_date"],
+                "exit_date": str(data.index[-1].date()),
+                "entry": safe_round(position["entry_price"]),
+                "exit": safe_round(last_price),
+                "lot": position["lot"],
+                "pnl": safe_round(pnl),
+                "return_pct": safe_round(trade_ret_pct),
+                "reason": "FORCED_EXIT",
+            }
+        )
+
+    total_trades = len(trades)
+    wins = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
+    losses = sum(1 for t in trades if (t.get("pnl") or 0) < 0)
+    gross_profit = sum((t.get("pnl") or 0) for t in trades if (t.get("pnl") or 0) > 0)
+    gross_loss_abs = abs(sum((t.get("pnl") or 0) for t in trades if (t.get("pnl") or 0) < 0))
+    avg_pnl = (sum((t.get("pnl") or 0) for t in trades) / total_trades) if total_trades > 0 else 0.0
+    win_rate = (wins / total_trades) * 100.0 if total_trades > 0 else 0.0
+    profit_factor = (gross_profit / gross_loss_abs) if gross_loss_abs > 0 else None
+
+    return {
+        "symbol": symbol,
+        "period_days": days,
+        "initial_capital": safe_round(initial_capital),
+        "final_capital": safe_round(equity),
+        "total_return_pct": safe_round(((equity / initial_capital) - 1.0) * 100.0),
+        "max_drawdown_pct": safe_round(max_dd),
+        "total_trades": total_trades,
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": safe_round(win_rate),
+        "profit_factor": safe_round(profit_factor) if profit_factor is not None else None,
+        "avg_pnl": safe_round(avg_pnl),
+        "decision_counts": decision_counts,
+        "assumptions": {
+            "fundamental_score_backtest": 50,
+            "news_score_backtest": 50,
+            "note": "Backtest, teknik+rejim agirlikli tahmini simülasyondur.",
+        },
+        "trades": trades[-30:],
+    }
+
+
 def build_decision(symbol: str, current_price: float) -> Optional[Dict[str, Any]]:
     technical = evaluate_technical(symbol, current_price)
     if technical is None:
@@ -661,6 +896,10 @@ def price_monitor_loop():
                         st["decision"] = decision
                         st["last_analysis_at"] = now_ts
 
+                        score_shift = abs(float(decision.get("score", 0)) - float(prev_decision.get("score", 0)))
+                        if decision.get("action") != prev_action or score_shift >= 4:
+                            append_decision_log(st, symbol, decision, price, now_ts)
+
                         action_changed = decision.get("action") != prev_action
                         decision_is_actionable = decision.get("action") in {"AL", "SAT"}
                         cooldown_done = now_ts - float(st.get("last_decision_alert_at", 0.0)) >= DECISION_ALERT_COOLDOWN_SEC
@@ -726,6 +965,56 @@ def api_data():
         "band_signals": band_signals,
         "decisions": decisions,
     })
+
+
+@app.route("/api/decision-log", methods=["GET"])
+def api_decision_log():
+    symbol = (request.args.get("symbol") or "").strip().upper()
+    limit_raw = request.args.get("limit")
+    try:
+        limit = int(limit_raw) if limit_raw else 50
+    except Exception:
+        limit = 50
+    limit = max(1, min(limit, DECISION_LOG_LIMIT))
+
+    with _state_lock:
+        if symbol:
+            st = WATCHLIST.get(symbol)
+            logs = (st or {}).get("decision_log", [])
+            return jsonify({"symbol": symbol, "count": len(logs[-limit:]), "logs": logs[-limit:]})
+
+        all_logs = []
+        for s, st in WATCHLIST.items():
+            for row in st.get("decision_log", []):
+                all_logs.append({**row, "symbol": s})
+        all_logs.sort(key=lambda x: x.get("ts", 0.0), reverse=True)
+        logs = all_logs[:limit]
+        return jsonify({"symbol": None, "count": len(logs), "logs": logs})
+
+
+@app.route("/api/backtest", methods=["GET"])
+def api_backtest():
+    symbol = (request.args.get("symbol") or "").strip().upper()
+    if not symbol:
+        return jsonify({"error": "symbol is required"}), 400
+
+    days_raw = request.args.get("days")
+    capital_raw = request.args.get("capital")
+
+    try:
+        days = int(days_raw) if days_raw else 365
+    except Exception:
+        days = 365
+
+    try:
+        capital = float(capital_raw.replace(",", ".")) if capital_raw else BACKTEST_INITIAL_CAPITAL
+    except Exception:
+        capital = BACKTEST_INITIAL_CAPITAL
+
+    result = run_backtest(symbol=symbol, days=days, initial_capital=capital)
+    if result.get("error"):
+        return jsonify(result), 400
+    return jsonify(result)
 
 
 # ================= PANEL =================

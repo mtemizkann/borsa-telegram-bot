@@ -32,6 +32,8 @@ Required environment variables:
 - `FUND_WEIGHT` (optional, default: `0.25`)
 - `NEWS_WEIGHT` (optional, default: `0.20`)
 - `REGIME_WEIGHT` (optional, default: `0.10`)
+- `BACKTEST_INITIAL_CAPITAL` (optional, default: `100000`)
+- `DECISION_LOG_LIMIT` (optional, default: `200`)
 
 Keep `RUN_MONITOR_IN_WEB=false` in web so only the worker sends alerts.
 
@@ -43,6 +45,16 @@ Market session checks run with Istanbul time (`Europe/Istanbul`).
 Limitations (free data):
 - No live orderbook/kademe depth (free sources are limited)
 - News/KAP effect is keyword-based and should be treated as decision support, not certainty
+
+## New API endpoints
+
+- `GET /api/decision-log?symbol=TUPRS.IS&limit=50`
+  - Returns recent decision journal records
+- `GET /api/backtest?symbol=TUPRS.IS&days=365&capital=100000`
+  - Runs a quick historical simulation and returns metrics + last trades
+
+Backtest note:
+- Fundamental/news factors are fixed at neutral score in historical simulation due free-data limitations; result is primarily technical+regime performance estimation.
 
 ## Render deploy
 
