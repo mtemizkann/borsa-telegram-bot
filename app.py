@@ -1287,9 +1287,36 @@ def run_walkforward_calibration(symbol: str, total_days: int, train_days: int, t
 
     regime_scores = _regime_series_for_backtest(len(data))
     presets = {
-        "AGRESIF": {**PRESET_CONFIGS["AGRESIF"]},
-        "DENGELI": {**PRESET_CONFIGS["DENGELI"]},
-        "KORUMACI": {**PRESET_CONFIGS["KORUMACI"]},
+        "AGRESIF": {
+            "AL_THRESHOLD": PRESET_CONFIGS["AGRESIF"]["AL_THRESHOLD"],
+            "SAT_THRESHOLD": PRESET_CONFIGS["AGRESIF"]["SAT_THRESHOLD"],
+            "weights": {
+                "technical": PRESET_CONFIGS["AGRESIF"]["TECH_WEIGHT"],
+                "fundamental": PRESET_CONFIGS["AGRESIF"]["FUND_WEIGHT"],
+                "news": PRESET_CONFIGS["AGRESIF"]["NEWS_WEIGHT"],
+                "regime": PRESET_CONFIGS["AGRESIF"]["REGIME_WEIGHT"],
+            },
+        },
+        "DENGELI": {
+            "AL_THRESHOLD": PRESET_CONFIGS["DENGELI"]["AL_THRESHOLD"],
+            "SAT_THRESHOLD": PRESET_CONFIGS["DENGELI"]["SAT_THRESHOLD"],
+            "weights": {
+                "technical": PRESET_CONFIGS["DENGELI"]["TECH_WEIGHT"],
+                "fundamental": PRESET_CONFIGS["DENGELI"]["FUND_WEIGHT"],
+                "news": PRESET_CONFIGS["DENGELI"]["NEWS_WEIGHT"],
+                "regime": PRESET_CONFIGS["DENGELI"]["REGIME_WEIGHT"],
+            },
+        },
+        "KORUMACI": {
+            "AL_THRESHOLD": PRESET_CONFIGS["KORUMACI"]["AL_THRESHOLD"],
+            "SAT_THRESHOLD": PRESET_CONFIGS["KORUMACI"]["SAT_THRESHOLD"],
+            "weights": {
+                "technical": PRESET_CONFIGS["KORUMACI"]["TECH_WEIGHT"],
+                "fundamental": PRESET_CONFIGS["KORUMACI"]["FUND_WEIGHT"],
+                "news": PRESET_CONFIGS["KORUMACI"]["NEWS_WEIGHT"],
+                "regime": PRESET_CONFIGS["KORUMACI"]["REGIME_WEIGHT"],
+            },
+        },
     }
 
     folds = []
