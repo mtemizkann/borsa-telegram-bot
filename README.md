@@ -24,6 +24,7 @@ Required environment variables:
 - `MAX_STOP_DISTANCE_TL` (optional, default: `20`)
 - `ALERT_COOLDOWN_SEC` (optional, default: `180`)
 - `ANALYSIS_REFRESH_SEC` (optional, default: `300`)
+- `STRATEGY_PRESET` (optional, `AGRESIF` / `DENGELI` / `KORUMACI`, default: `DENGELI`)
 - `DECISION_ALERT_COOLDOWN_SEC` (optional, default: `3600`)
 - `NEWS_LOOKBACK_HOURS` (optional, default: `72`)
 - `AL_THRESHOLD` (optional, default: `72`)
@@ -41,6 +42,13 @@ If `RUN_MONITOR_IN_WEB=true`, bands are automatically recentered around the late
 Alerts are rate-limited per symbol with `ALERT_COOLDOWN_SEC`, and alerts are skipped if stop distance is outside `MIN_STOP_DISTANCE_TL` and `MAX_STOP_DISTANCE_TL`.
 Decision Engine v3 uses weighted factors (technical + fundamental + news + market regime) and outputs `AL / BEKLE / SAT` with entry, stop, target, risk and confidence score.
 Market session checks run with Istanbul time (`Europe/Istanbul`).
+
+Strategy presets:
+- `AGRESIF`: lower AL threshold, more signals, faster decision alerts
+- `DENGELI`: balanced defaults for normal usage
+- `KORUMACI`: higher AL threshold, fewer signals, slower decision alerts
+
+If you set custom `AL_THRESHOLD`, `SAT_THRESHOLD` or weight envs, they override preset defaults.
 
 Limitations (free data):
 - No live orderbook/kademe depth (free sources are limited)

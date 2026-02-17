@@ -15,27 +15,90 @@ app = Flask(__name__)
 TOKEN = os.environ.get("TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 RUN_MONITOR_IN_WEB = os.environ.get("RUN_MONITOR_IN_WEB", "false").strip().lower() == "true"
+STRATEGY_PRESET = os.environ.get("STRATEGY_PRESET", "DENGELI").strip().upper()
 
-ACCOUNT_SIZE = float(os.environ.get("ACCOUNT_SIZE", "150000").replace(",", "."))
-RISK_PERCENT = float(os.environ.get("RISK_PERCENT", "2").replace(",", "."))
-BAND_SIZE_TL = float(os.environ.get("BAND_SIZE_TL", "1").replace(",", "."))
-MIN_STOP_DISTANCE_TL = float(os.environ.get("MIN_STOP_DISTANCE_TL", "0.5").replace(",", "."))
-MAX_STOP_DISTANCE_TL = float(os.environ.get("MAX_STOP_DISTANCE_TL", "20").replace(",", "."))
-ALERT_COOLDOWN_SEC = int(float(os.environ.get("ALERT_COOLDOWN_SEC", "180").replace(",", ".")))
+PRESET_CONFIGS: Dict[str, Dict[str, float]] = {
+    "AGRESIF": {
+        "AL_THRESHOLD": 64,
+        "SAT_THRESHOLD": 42,
+        "TECH_WEIGHT": 0.55,
+        "FUND_WEIGHT": 0.20,
+        "NEWS_WEIGHT": 0.15,
+        "REGIME_WEIGHT": 0.10,
+        "DECISION_ALERT_COOLDOWN_SEC": 1800,
+    },
+    "DENGELI": {
+        "AL_THRESHOLD": 72,
+        "SAT_THRESHOLD": 38,
+        "TECH_WEIGHT": 0.45,
+        "FUND_WEIGHT": 0.25,
+        "NEWS_WEIGHT": 0.20,
+        "REGIME_WEIGHT": 0.10,
+        "DECISION_ALERT_COOLDOWN_SEC": 3600,
+    },
+    "KORUMACI": {
+        "AL_THRESHOLD": 78,
+        "SAT_THRESHOLD": 35,
+        "TECH_WEIGHT": 0.35,
+        "FUND_WEIGHT": 0.35,
+        "NEWS_WEIGHT": 0.20,
+        "REGIME_WEIGHT": 0.10,
+        "DECISION_ALERT_COOLDOWN_SEC": 5400,
+    },
+}
 
-ANALYSIS_REFRESH_SEC = int(float(os.environ.get("ANALYSIS_REFRESH_SEC", "300").replace(",", ".")))
-DECISION_ALERT_COOLDOWN_SEC = int(float(os.environ.get("DECISION_ALERT_COOLDOWN_SEC", "3600").replace(",", ".")))
-NEWS_LOOKBACK_HOURS = int(float(os.environ.get("NEWS_LOOKBACK_HOURS", "72").replace(",", ".")))
+if STRATEGY_PRESET not in PRESET_CONFIGS:
+    STRATEGY_PRESET = "DENGELI"
 
-AL_THRESHOLD = int(float(os.environ.get("AL_THRESHOLD", "72").replace(",", ".")))
-SAT_THRESHOLD = int(float(os.environ.get("SAT_THRESHOLD", "38").replace(",", ".")))
+_preset = PRESET_CONFIGS[STRATEGY_PRESET]
 
-TECH_WEIGHT = float(os.environ.get("TECH_WEIGHT", "0.45").replace(",", "."))
-FUND_WEIGHT = float(os.environ.get("FUND_WEIGHT", "0.25").replace(",", "."))
-NEWS_WEIGHT = float(os.environ.get("NEWS_WEIGHT", "0.20").replace(",", "."))
-REGIME_WEIGHT = float(os.environ.get("REGIME_WEIGHT", "0.10").replace(",", "."))
-BACKTEST_INITIAL_CAPITAL = float(os.environ.get("BACKTEST_INITIAL_CAPITAL", "100000").replace(",", "."))
-DECISION_LOG_LIMIT = int(float(os.environ.get("DECISION_LOG_LIMIT", "200").replace(",", ".")))
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)).replace(",", "."))
+    except Exception:
+        return float(default)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(float(os.environ.get(name, str(default)).replace(",", ".")))
+    except Exception:
+        return int(default)
+
+ACCOUNT_SIZE = _env_float("ACCOUNT_SIZE", 150000)
+RISK_PERCENT = _env_float("RISK_PERCENT", 2)
+BAND_SIZE_TL = _env_float("BAND_SIZE_TL", 1)
+MIN_STOP_DISTANCE_TL = _env_float("MIN_STOP_DISTANCE_TL", 0.5)
+MAX_STOP_DISTANCE_TL = _env_float("MAX_STOP_DISTANCE_TL", 20)
+ALERT_COOLDOWN_SEC = _env_int("ALERT_COOLDOWN_SEC", 180)
+
+ANALYSIS_REFRESH_SEC = _env_int("ANALYSIS_REFRESH_SEC", 300)
+DECISION_ALERT_COOLDOWN_SEC = _env_int("DECISION_ALERT_COOLDOWN_SEC", int(_preset["DECISION_ALERT_COOLDOWN_SEC"]))
+NEWS_LOOKBACK_HOURS = _env_int("NEWS_LOOKBACK_HOURS", 72)
+
+AL_THRESHOLD = _env_int("AL_THRESHOLD", int(_preset["AL_THRESHOLD"]))
+SAT_THRESHOLD = _env_int("SAT_THRESHOLD", int(_preset["SAT_THRESHOLD"]))
+
+TECH_WEIGHT = _env_float("TECH_WEIGHT", _preset["TECH_WEIGHT"])
+FUND_WEIGHT = _env_float("FUND_WEIGHT", _preset["FUND_WEIGHT"])
+NEWS_WEIGHT = _env_float("NEWS_WEIGHT", _preset["NEWS_WEIGHT"])
+REGIME_WEIGHT = _env_float("REGIME_WEIGHT", _preset["REGIME_WEIGHT"])
+BACKTEST_INITIAL_CAPITAL = _env_float("BACKTEST_INITIAL_CAPITAL", 100000)
+DECISION_LOG_LIMIT = _env_int("DECISION_LOG_LIMIT", 200)
+
+EFFECTIVE_STRATEGY = {
+    "preset": STRATEGY_PRESET,
+    "al_threshold": AL_THRESHOLD,
+    "sat_threshold": SAT_THRESHOLD,
+    "weights": {
+        "technical": TECH_WEIGHT,
+        "fundamental": FUND_WEIGHT,
+        "news": NEWS_WEIGHT,
+        "regime": REGIME_WEIGHT,
+    },
+    "decision_alert_cooldown_sec": DECISION_ALERT_COOLDOWN_SEC,
+}
 
 # ================= STATE =================
 WATCHLIST: Dict[str, Dict[str, Any]] = {
@@ -964,6 +1027,7 @@ def api_data():
         "watchlist": snapshot,
         "band_signals": band_signals,
         "decisions": decisions,
+        "strategy": EFFECTIVE_STRATEGY,
     })
 
 
@@ -1014,6 +1078,7 @@ def api_backtest():
     result = run_backtest(symbol=symbol, days=days, initial_capital=capital)
     if result.get("error"):
         return jsonify(result), 400
+    result["strategy"] = EFFECTIVE_STRATEGY
     return jsonify(result)
 
 
@@ -1049,6 +1114,7 @@ def home():
     </head>
     <body>
     <h1>BIST Alarm + Karar Paneli (v3)</h1>
+    <p>Preset: {{strategy["preset"]}} | AL: {{strategy["al_threshold"]}} | SAT: {{strategy["sat_threshold"]}}</p>
 
     <table border="1" cellpadding="10">
     <tr>
@@ -1116,7 +1182,7 @@ def home():
     </html>
     """
 
-    return render_template_string(html, watchlist=snapshot)
+    return render_template_string(html, watchlist=snapshot, strategy=EFFECTIVE_STRATEGY)
 
 
 if __name__ == "__main__":
