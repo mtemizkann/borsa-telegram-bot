@@ -86,6 +86,9 @@ NEWS_WEIGHT = _env_float("NEWS_WEIGHT", _preset["NEWS_WEIGHT"])
 REGIME_WEIGHT = _env_float("REGIME_WEIGHT", _preset["REGIME_WEIGHT"])
 BACKTEST_INITIAL_CAPITAL = _env_float("BACKTEST_INITIAL_CAPITAL", 100000)
 DECISION_LOG_LIMIT = _env_int("DECISION_LOG_LIMIT", 200)
+DAILY_RISK_CAP_PERCENT = _env_float("DAILY_RISK_CAP_PERCENT", 6.0)
+MAX_ACTIVE_POSITIONS = _env_int("MAX_ACTIVE_POSITIONS", 2)
+MAX_POSITIONS_PER_SECTOR = _env_int("MAX_POSITIONS_PER_SECTOR", 1)
 
 EFFECTIVE_STRATEGY = {
     "preset": STRATEGY_PRESET,
@@ -98,6 +101,11 @@ EFFECTIVE_STRATEGY = {
         "regime": REGIME_WEIGHT,
     },
     "decision_alert_cooldown_sec": DECISION_ALERT_COOLDOWN_SEC,
+    "risk_controls": {
+        "daily_risk_cap_percent": DAILY_RISK_CAP_PERCENT,
+        "max_active_positions": MAX_ACTIVE_POSITIONS,
+        "max_positions_per_sector": MAX_POSITIONS_PER_SECTOR,
+    },
 }
 
 # ================= STATE =================
@@ -142,6 +150,12 @@ _state_lock = threading.Lock()
 _monitor_started = False
 _monitor_lock = threading.Lock()
 _regime_cache: Dict[str, Any] = {"score": 55.0, "reason": "Nötr", "updated_at": 0.0}
+_symbol_sector_cache: Dict[str, str] = {}
+_risk_state: Dict[str, Any] = {
+    "date": "",
+    "daily_used_risk": 0.0,
+    "open_positions": {},
+}
 
 
 # ================= HELPERS =================
@@ -278,6 +292,116 @@ def append_decision_log(st: Dict[str, Any], symbol: str, decision: Dict[str, Any
     )
     if len(logs) > DECISION_LOG_LIMIT:
         del logs[: len(logs) - DECISION_LOG_LIMIT]
+
+
+def _today_istanbul_date() -> str:
+    return datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d")
+
+
+def _ensure_risk_day_locked() -> None:
+    today = _today_istanbul_date()
+    if _risk_state.get("date") != today:
+        _risk_state["date"] = today
+        _risk_state["daily_used_risk"] = 0.0
+        _risk_state["open_positions"] = {}
+
+
+def _get_symbol_sector(symbol: str) -> str:
+    cached = _symbol_sector_cache.get(symbol)
+    if cached:
+        return cached
+
+    sector = "UNKNOWN"
+    try:
+        info = get_ticker(symbol).info or {}
+        sector = (info.get("sector") or info.get("industry") or "UNKNOWN").strip().upper()
+    except Exception:
+        sector = "UNKNOWN"
+
+    if not sector:
+        sector = "UNKNOWN"
+    _symbol_sector_cache[symbol] = sector
+    return sector
+
+
+def _sector_position_count_locked(sector: str) -> int:
+    count = 0
+    for pos in _risk_state.get("open_positions", {}).values():
+        if pos.get("sector") == sector:
+            count += 1
+    return count
+
+
+def apply_risk_controls_locked(symbol: str, decision: Dict[str, Any], now_ts: float) -> Dict[str, Any]:
+    _ensure_risk_day_locked()
+
+    risk_budget = ACCOUNT_SIZE * (DAILY_RISK_CAP_PERCENT / 100.0)
+    open_positions = _risk_state.get("open_positions", {})
+    sector = _get_symbol_sector(symbol)
+
+    risk_meta = {
+        "sector": sector,
+        "risk_budget": safe_round(risk_budget),
+        "daily_used_risk": safe_round(_risk_state.get("daily_used_risk", 0.0)),
+        "active_positions": len(open_positions),
+        "sector_positions": _sector_position_count_locked(sector),
+        "allow_new_position": True,
+        "block_reason": None,
+    }
+
+    action = decision.get("action")
+
+    if action == "SAT" and symbol in open_positions:
+        open_positions.pop(symbol, None)
+        risk_meta["active_positions"] = len(open_positions)
+
+    if action == "AL":
+        if symbol in open_positions:
+            risk_meta["allow_new_position"] = False
+            risk_meta["block_reason"] = "Sembolde zaten acik pozisyon var"
+        elif len(open_positions) >= MAX_ACTIVE_POSITIONS:
+            risk_meta["allow_new_position"] = False
+            risk_meta["block_reason"] = "Maksimum acik pozisyon limitine ulasildi"
+        elif _sector_position_count_locked(sector) >= MAX_POSITIONS_PER_SECTOR:
+            risk_meta["allow_new_position"] = False
+            risk_meta["block_reason"] = "Sektor bazli pozisyon limiti asildi"
+        else:
+            requested_risk = float(decision.get("risk") or 0.0)
+            used = float(_risk_state.get("daily_used_risk", 0.0))
+            if requested_risk <= 0:
+                risk_meta["allow_new_position"] = False
+                risk_meta["block_reason"] = "Risk degeri hesaplanamadi"
+            elif used + requested_risk > risk_budget:
+                risk_meta["allow_new_position"] = False
+                risk_meta["block_reason"] = "Gunluk risk limiti asiliyor"
+
+        if risk_meta["allow_new_position"]:
+            requested_risk = float(decision.get("risk") or 0.0)
+            open_positions[symbol] = {
+                "opened_at": now_ts,
+                "sector": sector,
+                "risk": requested_risk,
+                "entry_low": decision.get("entry_low"),
+                "entry_high": decision.get("entry_high"),
+                "stop": decision.get("stop"),
+            }
+            _risk_state["daily_used_risk"] = float(_risk_state.get("daily_used_risk", 0.0)) + requested_risk
+        else:
+            decision["action"] = "BEKLE"
+            decision["lot"] = None
+            decision["risk"] = None
+            decision["target1"] = None
+            decision["target2"] = None
+            decision["rr"] = None
+            reasons = list(decision.get("reasons", []))
+            reasons.insert(0, f"Risk filtresi: {risk_meta['block_reason']}")
+            decision["reasons"] = reasons[:5]
+
+    risk_meta["daily_used_risk"] = safe_round(_risk_state.get("daily_used_risk", 0.0))
+    risk_meta["active_positions"] = len(open_positions)
+    risk_meta["sector_positions"] = _sector_position_count_locked(sector)
+    decision["risk_controls"] = risk_meta
+    return decision
 
 
 def evaluate_technical(symbol: str, current_price: float) -> Optional[Dict[str, Any]]:
@@ -956,6 +1080,7 @@ def price_monitor_loop():
 
                         prev_decision = st.get("decision") or {}
                         prev_action = prev_decision.get("action")
+                        decision = apply_risk_controls_locked(symbol, decision, now_ts)
                         st["decision"] = decision
                         st["last_analysis_at"] = now_ts
 
@@ -1002,6 +1127,14 @@ def start_monitor_once():
 def api_data():
     with _state_lock:
         snapshot = {k: v.copy() for k, v in WATCHLIST.items()}
+        _ensure_risk_day_locked()
+        risk_state = {
+            "date": _risk_state.get("date"),
+            "daily_used_risk": safe_round(_risk_state.get("daily_used_risk", 0.0)),
+            "daily_risk_budget": safe_round(ACCOUNT_SIZE * (DAILY_RISK_CAP_PERCENT / 100.0)),
+            "active_positions": len(_risk_state.get("open_positions", {})),
+            "open_positions": _risk_state.get("open_positions", {}).copy(),
+        }
 
     prices = {}
     band_signals = {}
@@ -1028,7 +1161,28 @@ def api_data():
         "band_signals": band_signals,
         "decisions": decisions,
         "strategy": EFFECTIVE_STRATEGY,
+        "risk_state": risk_state,
     })
+
+
+@app.route("/api/risk-state", methods=["GET"])
+def api_risk_state():
+    with _state_lock:
+        _ensure_risk_day_locked()
+        return jsonify(
+            {
+                "date": _risk_state.get("date"),
+                "daily_used_risk": safe_round(_risk_state.get("daily_used_risk", 0.0)),
+                "daily_risk_budget": safe_round(ACCOUNT_SIZE * (DAILY_RISK_CAP_PERCENT / 100.0)),
+                "active_positions": len(_risk_state.get("open_positions", {})),
+                "open_positions": _risk_state.get("open_positions", {}),
+                "limits": {
+                    "daily_risk_cap_percent": DAILY_RISK_CAP_PERCENT,
+                    "max_active_positions": MAX_ACTIVE_POSITIONS,
+                    "max_positions_per_sector": MAX_POSITIONS_PER_SECTOR,
+                },
+            }
+        )
 
 
 @app.route("/api/decision-log", methods=["GET"])

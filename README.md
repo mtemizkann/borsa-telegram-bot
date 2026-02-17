@@ -35,6 +35,9 @@ Required environment variables:
 - `REGIME_WEIGHT` (optional, default: `0.10`)
 - `BACKTEST_INITIAL_CAPITAL` (optional, default: `100000`)
 - `DECISION_LOG_LIMIT` (optional, default: `200`)
+- `DAILY_RISK_CAP_PERCENT` (optional, default: `6`)
+- `MAX_ACTIVE_POSITIONS` (optional, default: `2`)
+- `MAX_POSITIONS_PER_SECTOR` (optional, default: `1`)
 
 Keep `RUN_MONITOR_IN_WEB=false` in web so only the worker sends alerts.
 
@@ -50,6 +53,11 @@ Strategy presets:
 
 If you set custom `AL_THRESHOLD`, `SAT_THRESHOLD` or weight envs, they override preset defaults.
 
+Risk Engine v2:
+- New positions are blocked when daily risk budget is exceeded
+- New positions are blocked when max concurrent positions is reached
+- New positions are blocked when sector concentration limit is reached
+
 Limitations (free data):
 - No live orderbook/kademe depth (free sources are limited)
 - News/KAP effect is keyword-based and should be treated as decision support, not certainty
@@ -60,6 +68,8 @@ Limitations (free data):
   - Returns recent decision journal records
 - `GET /api/backtest?symbol=TUPRS.IS&days=365&capital=100000`
   - Runs a quick historical simulation and returns metrics + last trades
+- `GET /api/risk-state`
+  - Returns daily risk usage, open positions and configured limits
 
 Backtest note:
 - Fundamental/news factors are fixed at neutral score in historical simulation due free-data limitations; result is primarily technical+regime performance estimation.
