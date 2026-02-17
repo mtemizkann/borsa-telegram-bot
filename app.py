@@ -91,6 +91,8 @@ MAX_ACTIVE_POSITIONS = _env_int("MAX_ACTIVE_POSITIONS", 2)
 MAX_POSITIONS_PER_SECTOR = _env_int("MAX_POSITIONS_PER_SECTOR", 1)
 PARTIAL_TP1_RATIO = _env_float("PARTIAL_TP1_RATIO", 0.5)
 TRAILING_STOP_PCT = _env_float("TRAILING_STOP_PCT", 1.2)
+AUTO_PRESET_BY_REGIME = os.environ.get("AUTO_PRESET_BY_REGIME", "true").strip().lower() == "true"
+DAILY_REPORT_HOUR = _env_int("DAILY_REPORT_HOUR", 18)
 
 EFFECTIVE_STRATEGY = {
     "preset": STRATEGY_PRESET,
@@ -112,6 +114,7 @@ EFFECTIVE_STRATEGY = {
         "partial_tp1_ratio": PARTIAL_TP1_RATIO,
         "trailing_stop_pct": TRAILING_STOP_PCT,
     },
+    "auto_preset_by_regime": AUTO_PRESET_BY_REGIME,
 }
 
 # ================= STATE =================
@@ -161,6 +164,17 @@ _risk_state: Dict[str, Any] = {
     "date": "",
     "daily_used_risk": 0.0,
     "open_positions": {},
+}
+_performance_state: Dict[str, Any] = {
+    "date": "",
+    "daily_realized_pnl": 0.0,
+    "closed_trades": 0,
+    "partial_exits": 0,
+    "wins": 0,
+    "losses": 0,
+    "decision_counts": {"AL": 0, "BEKLE": 0, "SAT": 0},
+    "reports_sent": False,
+    "recent_events": [],
 }
 
 
@@ -311,6 +325,17 @@ def _ensure_risk_day_locked() -> None:
         _risk_state["daily_used_risk"] = 0.0
         _risk_state["open_positions"] = {}
 
+    if _performance_state.get("date") != today:
+        _performance_state["date"] = today
+        _performance_state["daily_realized_pnl"] = 0.0
+        _performance_state["closed_trades"] = 0
+        _performance_state["partial_exits"] = 0
+        _performance_state["wins"] = 0
+        _performance_state["losses"] = 0
+        _performance_state["decision_counts"] = {"AL": 0, "BEKLE": 0, "SAT": 0}
+        _performance_state["reports_sent"] = False
+        _performance_state["recent_events"] = []
+
 
 def _get_symbol_sector(symbol: str) -> str:
     cached = _symbol_sector_cache.get(symbol)
@@ -358,7 +383,14 @@ def apply_risk_controls_locked(symbol: str, decision: Dict[str, Any], now_ts: fl
     action = decision.get("action")
 
     if action == "SAT" and symbol in open_positions:
-        close_open_position_locked(symbol, float(decision.get("entry_low") or decision.get("entry_high") or 0.0), "SAT_DECISION", now_ts)
+        close_event = close_open_position_locked(
+            symbol,
+            float(decision.get("entry_low") or decision.get("entry_high") or 0.0),
+            "SAT_DECISION",
+            now_ts,
+        )
+        if close_event:
+            _register_position_event_locked(close_event)
         risk_meta["active_positions"] = len(open_positions)
 
     if action == "AL":
@@ -824,6 +856,118 @@ def _regime_series_for_backtest(length: int):
         return [55.0] * length
 
 
+def _select_runtime_preset(regime_score: float) -> str:
+    if not AUTO_PRESET_BY_REGIME:
+        return STRATEGY_PRESET
+    if regime_score >= 72:
+        return "AGRESIF"
+    if regime_score <= 45:
+        return "KORUMACI"
+    return "DENGELI"
+
+
+def _runtime_params(regime_score: float) -> Dict[str, Any]:
+    preset_name = _select_runtime_preset(regime_score)
+    conf = PRESET_CONFIGS.get(preset_name, PRESET_CONFIGS["DENGELI"])
+    return {
+        "preset": preset_name,
+        "al_threshold": int(conf["AL_THRESHOLD"]),
+        "sat_threshold": int(conf["SAT_THRESHOLD"]),
+        "weights": {
+            "technical": float(conf["TECH_WEIGHT"]),
+            "fundamental": float(conf["FUND_WEIGHT"]),
+            "news": float(conf["NEWS_WEIGHT"]),
+            "regime": float(conf["REGIME_WEIGHT"]),
+        },
+    }
+
+
+def _append_performance_event_locked(event: Dict[str, Any]) -> None:
+    _ensure_risk_day_locked()
+    events = _performance_state.setdefault("recent_events", [])
+    events.append(event)
+    if len(events) > 80:
+        del events[: len(events) - 80]
+
+
+def _register_decision_locked(action: str) -> None:
+    _ensure_risk_day_locked()
+    counts = _performance_state.setdefault("decision_counts", {"AL": 0, "BEKLE": 0, "SAT": 0})
+    if action not in counts:
+        counts[action] = 0
+    counts[action] += 1
+
+
+def _register_position_event_locked(event: Dict[str, Any]) -> None:
+    _ensure_risk_day_locked()
+    _append_performance_event_locked(event)
+
+    if event.get("type") == "partial_tp1":
+        _performance_state["partial_exits"] = int(_performance_state.get("partial_exits", 0)) + 1
+        return
+
+    if event.get("type") == "close":
+        pnl = float(event.get("pnl") or 0.0)
+        _performance_state["daily_realized_pnl"] = float(_performance_state.get("daily_realized_pnl", 0.0)) + pnl
+        _performance_state["closed_trades"] = int(_performance_state.get("closed_trades", 0)) + 1
+        if pnl >= 0:
+            _performance_state["wins"] = int(_performance_state.get("wins", 0)) + 1
+        else:
+            _performance_state["losses"] = int(_performance_state.get("losses", 0)) + 1
+
+
+def _performance_snapshot_locked() -> Dict[str, Any]:
+    _ensure_risk_day_locked()
+    closed = int(_performance_state.get("closed_trades", 0))
+    wins = int(_performance_state.get("wins", 0))
+    losses = int(_performance_state.get("losses", 0))
+    daily_realized = float(_performance_state.get("daily_realized_pnl", 0.0))
+    expectancy = (daily_realized / closed) if closed > 0 else 0.0
+    win_rate = (wins / closed) * 100.0 if closed > 0 else 0.0
+    return {
+        "date": _performance_state.get("date"),
+        "daily_realized_pnl": safe_round(daily_realized),
+        "closed_trades": closed,
+        "partial_exits": int(_performance_state.get("partial_exits", 0)),
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": safe_round(win_rate),
+        "expectancy": safe_round(expectancy),
+        "decision_counts": dict(_performance_state.get("decision_counts", {})),
+        "recent_events": list(_performance_state.get("recent_events", [])[-20:]),
+        "reports_sent": bool(_performance_state.get("reports_sent", False)),
+    }
+
+
+def _maybe_send_daily_report_locked(now_ts: float) -> None:
+    _ensure_risk_day_locked()
+    if not TOKEN or not CHAT_ID:
+        return
+
+    now = datetime.fromtimestamp(now_ts, ZoneInfo("Europe/Istanbul"))
+    if now.hour != DAILY_REPORT_HOUR:
+        return
+    if _performance_state.get("reports_sent"):
+        return
+
+    perf = _performance_snapshot_locked()
+    risk_budget = ACCOUNT_SIZE * (DAILY_RISK_CAP_PERCENT / 100.0)
+    used = float(_risk_state.get("daily_used_risk", 0.0))
+
+    msg = (
+        f"📊 GUNLUK SISTEM OZETI\n"
+        f"Tarih: {perf.get('date')}\n"
+        f"Gerceklesen PnL: {perf.get('daily_realized_pnl')}\n"
+        f"Kapanan Islem: {perf.get('closed_trades')}\n"
+        f"Win Rate: {perf.get('win_rate_pct')}%\n"
+        f"Expectancy: {perf.get('expectancy')}\n"
+        f"Risk Kullanimi: {safe_round(used)} / {safe_round(risk_budget)}\n"
+        f"Karar Sayilari: {perf.get('decision_counts')}"
+    )
+    send_telegram(msg)
+    _performance_state["reports_sent"] = True
+
+
 def run_backtest(symbol: str, days: int, initial_capital: float) -> Dict[str, Any]:
     hist = fetch_daily_history(symbol)
     if hist is None or len(hist) < 260:
@@ -1005,6 +1149,212 @@ def run_backtest(symbol: str, days: int, initial_capital: float) -> Dict[str, An
     }
 
 
+def _simulate_segment(data, regime_scores: List[float], params: Dict[str, Any], initial_capital: float) -> Dict[str, Any]:
+    weights = params["weights"]
+    weight_sum = sum(weights.values())
+    if weight_sum <= 0:
+        weight_sum = 1.0
+    w_tech = weights["technical"] / weight_sum
+    w_fund = weights["fundamental"] / weight_sum
+    w_news = weights["news"] / weight_sum
+    w_regime = weights["regime"] / weight_sum
+
+    al_th = int(params["AL_THRESHOLD"])
+    sat_th = int(params["SAT_THRESHOLD"])
+
+    equity = float(initial_capital)
+    peak = equity
+    max_dd = 0.0
+    trades = 0
+    wins = 0
+    losses = 0
+    gross_profit = 0.0
+    gross_loss_abs = 0.0
+    position = None
+
+    for i, (_, row) in enumerate(data.iterrows()):
+        price = float(row["Close"])
+        ema20 = float(row["ema20"])
+        ema50 = float(row["ema50"])
+        ema200 = float(row["ema200"])
+        rsi14 = float(row["rsi14"])
+        atr20 = float(row["atr20"])
+        breakout = float(row["breakout"])
+
+        tech_score = 0
+        if ema20 > ema50 > ema200:
+            tech_score += 35
+        elif ema20 < ema50 < ema200:
+            tech_score += 5
+        else:
+            tech_score += 18
+        if price > ema50:
+            tech_score += 10
+        if abs(price - ema20) / max(price, 1e-6) <= 0.015:
+            tech_score += 15
+        if price > breakout:
+            tech_score += 15
+        if 48 <= rsi14 <= 62:
+            tech_score += 12
+        elif 40 <= rsi14 <= 70:
+            tech_score += 6
+        if 0.008 <= (atr20 / max(price, 1e-6)) <= 0.045:
+            tech_score += 10
+        tech_score = clamp(tech_score, 0, 100)
+
+        regime_score = float(regime_scores[i]) if i < len(regime_scores) else 55.0
+        total_score = tech_score * w_tech + 50.0 * w_fund + 50.0 * w_news + regime_score * w_regime
+
+        if total_score >= al_th and tech_score >= 60 and regime_score >= 50:
+            action = "AL"
+        elif total_score <= sat_th or (tech_score <= 35 and regime_score < 45):
+            action = "SAT"
+        else:
+            action = "BEKLE"
+
+        if position is None and action == "AL":
+            stop = min(ema20, price - (1.2 * atr20))
+            stop = min(stop, price - 0.01)
+            if stop_distance_allowed(price, stop):
+                risk_per_share = price - stop
+                lot = int((equity * (RISK_PERCENT / 100.0)) / max(risk_per_share, 1e-6))
+                if lot > 0:
+                    position = {
+                        "entry": price,
+                        "stop": stop,
+                        "target": price + (2 * risk_per_share),
+                        "lot": lot,
+                    }
+        elif position is not None:
+            exit_price = None
+            if float(row["Low"]) <= position["stop"]:
+                exit_price = position["stop"]
+            elif float(row["High"]) >= position["target"]:
+                exit_price = position["target"]
+            elif action == "SAT":
+                exit_price = price
+
+            if exit_price is not None:
+                pnl = (exit_price - position["entry"]) * position["lot"]
+                equity += pnl
+                trades += 1
+                if pnl >= 0:
+                    wins += 1
+                    gross_profit += pnl
+                else:
+                    losses += 1
+                    gross_loss_abs += abs(pnl)
+                position = None
+
+        peak = max(peak, equity)
+        dd = ((peak - equity) / max(peak, 1e-6)) * 100.0
+        max_dd = max(max_dd, dd)
+
+    total_return_pct = ((equity / initial_capital) - 1.0) * 100.0
+    profit_factor = (gross_profit / gross_loss_abs) if gross_loss_abs > 0 else (2.0 if gross_profit > 0 else 0.0)
+    return {
+        "total_return_pct": safe_round(total_return_pct),
+        "max_drawdown_pct": safe_round(max_dd),
+        "profit_factor": safe_round(profit_factor),
+        "trades": trades,
+        "wins": wins,
+        "losses": losses,
+    }
+
+
+def run_walkforward_calibration(symbol: str, total_days: int, train_days: int, test_days: int, initial_capital: float) -> Dict[str, Any]:
+    hist = fetch_daily_history(symbol)
+    if hist is None or len(hist) < (train_days + test_days + 220):
+        return {"error": "Not enough data for walk-forward"}
+
+    total_days = int(clamp(total_days, train_days + test_days, 730))
+    data = hist.tail(total_days + 220).copy()
+    close = data["Close"]
+    high = data["High"]
+    low = data["Low"]
+    data["ema20"] = close.ewm(span=20, adjust=False).mean()
+    data["ema50"] = close.ewm(span=50, adjust=False).mean()
+    data["ema200"] = close.ewm(span=200, adjust=False).mean()
+    data["atr20"] = (high - low).rolling(20).mean()
+    data["rsi14"] = (100 - (100 / (1 + (
+        close.diff().clip(lower=0).ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+        / ((-close.diff().clip(upper=0)).ewm(alpha=1 / 14, min_periods=14, adjust=False).mean().replace(0, 1e-9))
+    ))))
+    data["breakout"] = high.rolling(20).max().shift(1)
+    data = data.dropna().tail(total_days)
+    if len(data) < (train_days + test_days):
+        return {"error": "Not enough calculated bars for walk-forward"}
+
+    regime_scores = _regime_series_for_backtest(len(data))
+    presets = {
+        "AGRESIF": {**PRESET_CONFIGS["AGRESIF"]},
+        "DENGELI": {**PRESET_CONFIGS["DENGELI"]},
+        "KORUMACI": {**PRESET_CONFIGS["KORUMACI"]},
+    }
+
+    folds = []
+    i = 0
+    while (i + train_days + test_days) <= len(data):
+        train_slice = data.iloc[i : i + train_days]
+        test_slice = data.iloc[i + train_days : i + train_days + test_days]
+        train_regime = regime_scores[i : i + train_days]
+        test_regime = regime_scores[i + train_days : i + train_days + test_days]
+
+        train_scores = {}
+        for name, conf in presets.items():
+            train_res = _simulate_segment(train_slice, train_regime, conf, initial_capital)
+            score = (float(train_res.get("total_return_pct") or 0.0) * 1.0) + (float(train_res.get("profit_factor") or 0.0) * 8.0) - (float(train_res.get("max_drawdown_pct") or 0.0) * 0.7)
+            train_scores[name] = {"metrics": train_res, "score": safe_round(score, 3)}
+
+        best_name = max(train_scores.keys(), key=lambda k: float(train_scores[k]["score"] or -9999))
+        test_res = _simulate_segment(test_slice, test_regime, presets[best_name], initial_capital)
+        folds.append(
+            {
+                "fold": len(folds) + 1,
+                "selected_preset": best_name,
+                "train_scores": train_scores,
+                "test_metrics": test_res,
+            }
+        )
+        i += test_days
+
+    if not folds:
+        return {"error": "No folds generated"}
+
+    preset_pick_counts = {"AGRESIF": 0, "DENGELI": 0, "KORUMACI": 0}
+    total_test_return = 0.0
+    total_test_dd = 0.0
+    total_test_pf = 0.0
+    pf_count = 0
+    total_test_trades = 0
+    for f in folds:
+        preset_pick_counts[f["selected_preset"]] += 1
+        total_test_return += float(f["test_metrics"].get("total_return_pct") or 0.0)
+        total_test_dd += float(f["test_metrics"].get("max_drawdown_pct") or 0.0)
+        pf_val = f["test_metrics"].get("profit_factor")
+        if pf_val is not None:
+            total_test_pf += float(pf_val)
+            pf_count += 1
+        total_test_trades += int(f["test_metrics"].get("trades") or 0)
+
+    recommended = max(preset_pick_counts.keys(), key=lambda k: preset_pick_counts[k])
+    return {
+        "symbol": symbol,
+        "train_days": train_days,
+        "test_days": test_days,
+        "folds": len(folds),
+        "recommended_preset": recommended,
+        "preset_pick_counts": preset_pick_counts,
+        "aggregate_test": {
+            "avg_return_pct": safe_round(total_test_return / len(folds)),
+            "avg_max_drawdown_pct": safe_round(total_test_dd / len(folds)),
+            "avg_profit_factor": safe_round(total_test_pf / pf_count) if pf_count > 0 else None,
+            "avg_trades": safe_round(total_test_trades / len(folds), 2),
+        },
+        "fold_details": folds,
+    }
+
+
 def build_decision(symbol: str, current_price: float) -> Optional[Dict[str, Any]]:
     technical = evaluate_technical(symbol, current_price)
     if technical is None:
@@ -1014,7 +1364,16 @@ def build_decision(symbol: str, current_price: float) -> Optional[Dict[str, Any]
     news = evaluate_news(symbol)
     regime = evaluate_market_regime()
 
-    w_tech, w_fund, w_news, w_regime = normalize_weights()
+    params = _runtime_params(float(regime.get("score") or 55.0))
+    weights = params["weights"]
+    weight_sum = sum(weights.values())
+    if weight_sum <= 0:
+        weight_sum = 1.0
+    w_tech = weights["technical"] / weight_sum
+    w_fund = weights["fundamental"] / weight_sum
+    w_news = weights["news"] / weight_sum
+    w_regime = weights["regime"] / weight_sum
+
     total_score = (
         technical["score"] * w_tech
         + fundamental["score"] * w_fund
@@ -1023,9 +1382,9 @@ def build_decision(symbol: str, current_price: float) -> Optional[Dict[str, Any]
     )
     total_score = int(round(clamp(total_score, 0, 100)))
 
-    if total_score >= AL_THRESHOLD and technical["score"] >= 60 and regime["score"] >= 50:
+    if total_score >= int(params["al_threshold"]) and technical["score"] >= 60 and regime["score"] >= 50:
         action = "AL"
-    elif total_score <= SAT_THRESHOLD or (technical["score"] <= 35 and regime["score"] < 45):
+    elif total_score <= int(params["sat_threshold"]) or (technical["score"] <= 35 and regime["score"] < 45):
         action = "SAT"
     else:
         action = "BEKLE"
@@ -1093,6 +1452,11 @@ def build_decision(symbol: str, current_price: float) -> Optional[Dict[str, Any]
             "ema50": technical.get("ema50"),
             "ema200": technical.get("ema200"),
             "rsi14": technical.get("rsi14"),
+        },
+        "runtime_preset": params["preset"],
+        "runtime_thresholds": {
+            "al": int(params["al_threshold"]),
+            "sat": int(params["sat_threshold"]),
         },
     }
 
@@ -1213,6 +1577,8 @@ def price_monitor_loop():
                         st["alerted"] = None
 
                 for ev in position_events:
+                    with _state_lock:
+                        _register_position_event_locked(ev)
                     send_telegram(format_position_event_message(ev))
 
                 if should_refresh_analysis:
@@ -1236,6 +1602,8 @@ def price_monitor_loop():
                         if decision.get("action") != prev_action or score_shift >= 4:
                             append_decision_log(st, symbol, decision, price, now_ts)
 
+                        _register_decision_locked(str(decision.get("action") or "BEKLE"))
+
                         action_changed = decision.get("action") != prev_action
                         decision_is_actionable = decision.get("action") in {"AL", "SAT"}
                         cooldown_done = now_ts - float(st.get("last_decision_alert_at", 0.0)) >= DECISION_ALERT_COOLDOWN_SEC
@@ -1246,6 +1614,9 @@ def price_monitor_loop():
 
                     if send_decision:
                         send_telegram(format_decision_message(decision))
+
+            with _state_lock:
+                _maybe_send_daily_report_locked(time.time())
 
             time.sleep(30 if is_market_open else 60)
 
@@ -1283,6 +1654,7 @@ def api_data():
             "active_positions": len(_risk_state.get("open_positions", {})),
             "open_positions": _risk_state.get("open_positions", {}).copy(),
         }
+        performance = _performance_snapshot_locked()
 
     prices = {}
     band_signals = {}
@@ -1310,6 +1682,7 @@ def api_data():
         "decisions": decisions,
         "strategy": EFFECTIVE_STRATEGY,
         "risk_state": risk_state,
+        "performance": performance,
     })
 
 
@@ -1331,6 +1704,19 @@ def api_risk_state():
                 },
             }
         )
+
+
+@app.route("/api/performance", methods=["GET"])
+def api_performance():
+    with _state_lock:
+        _ensure_risk_day_locked()
+        perf = _performance_snapshot_locked()
+        perf["risk_usage"] = {
+            "used": safe_round(_risk_state.get("daily_used_risk", 0.0)),
+            "budget": safe_round(ACCOUNT_SIZE * (DAILY_RISK_CAP_PERCENT / 100.0)),
+            "open_positions": len(_risk_state.get("open_positions", {})),
+        }
+        return jsonify(perf)
 
 
 @app.route("/api/decision-log", methods=["GET"])
@@ -1381,6 +1767,45 @@ def api_backtest():
     if result.get("error"):
         return jsonify(result), 400
     result["strategy"] = EFFECTIVE_STRATEGY
+    return jsonify(result)
+
+
+@app.route("/api/calibrate", methods=["GET"])
+def api_calibrate():
+    symbol = (request.args.get("symbol") or "").strip().upper()
+    if not symbol:
+        return jsonify({"error": "symbol is required"}), 400
+
+    try:
+        total_days = int((request.args.get("days") or "540").strip())
+    except Exception:
+        total_days = 540
+    try:
+        train_days = int((request.args.get("train") or "180").strip())
+    except Exception:
+        train_days = 180
+    try:
+        test_days = int((request.args.get("test") or "60").strip())
+    except Exception:
+        test_days = 60
+    try:
+        capital = float((request.args.get("capital") or str(BACKTEST_INITIAL_CAPITAL)).replace(",", "."))
+    except Exception:
+        capital = BACKTEST_INITIAL_CAPITAL
+
+    if train_days < 120 or test_days < 20:
+        return jsonify({"error": "train>=120 and test>=20 required"}), 400
+
+    result = run_walkforward_calibration(
+        symbol=symbol,
+        total_days=total_days,
+        train_days=train_days,
+        test_days=test_days,
+        initial_capital=capital,
+    )
+    if result.get("error"):
+        return jsonify(result), 400
+    result["current_strategy"] = EFFECTIVE_STRATEGY
     return jsonify(result)
 
 

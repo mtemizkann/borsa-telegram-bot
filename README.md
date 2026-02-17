@@ -40,6 +40,8 @@ Required environment variables:
 - `MAX_POSITIONS_PER_SECTOR` (optional, default: `1`)
 - `PARTIAL_TP1_RATIO` (optional, default: `0.5`)
 - `TRAILING_STOP_PCT` (optional, default: `1.2`)
+- `AUTO_PRESET_BY_REGIME` (optional, default: `true`)
+- `DAILY_REPORT_HOUR` (optional, default: `18`)
 
 Keep `RUN_MONITOR_IN_WEB=false` in web so only the worker sends alerts.
 
@@ -52,6 +54,7 @@ Strategy presets:
 - `AGRESIF`: lower AL threshold, more signals, faster decision alerts
 - `DENGELI`: balanced defaults for normal usage
 - `KORUMACI`: higher AL threshold, fewer signals, slower decision alerts
+- Auto mode (`AUTO_PRESET_BY_REGIME=true`) dynamically switches preset by market regime score.
 
 If you set custom `AL_THRESHOLD`, `SAT_THRESHOLD` or weight envs, they override preset defaults.
 
@@ -77,9 +80,16 @@ Limitations (free data):
   - Runs a quick historical simulation and returns metrics + last trades
 - `GET /api/risk-state`
   - Returns daily risk usage, open positions and configured limits
+- `GET /api/performance`
+  - Returns daily realized PnL, expectancy, decision counts and recent events
+- `GET /api/calibrate?symbol=TUPRS.IS&days=540&train=180&test=60&capital=100000`
+  - Runs walk-forward calibration and returns recommended preset
 
 Backtest note:
 - Fundamental/news factors are fixed at neutral score in historical simulation due free-data limitations; result is primarily technical+regime performance estimation.
+
+Daily summary:
+- Bot sends one daily performance summary to Telegram at `DAILY_REPORT_HOUR` (Istanbul time).
 
 ## Render deploy
 
