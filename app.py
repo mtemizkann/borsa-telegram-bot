@@ -93,6 +93,7 @@ PARTIAL_TP1_RATIO = _env_float("PARTIAL_TP1_RATIO", 0.5)
 TRAILING_STOP_PCT = _env_float("TRAILING_STOP_PCT", 1.2)
 AUTO_PRESET_BY_REGIME = os.environ.get("AUTO_PRESET_BY_REGIME", "true").strip().lower() == "true"
 DAILY_REPORT_HOUR = _env_int("DAILY_REPORT_HOUR", 18)
+ALLOW_DECISION_ALERTS_OUTSIDE_MARKET = os.environ.get("ALLOW_DECISION_ALERTS_OUTSIDE_MARKET", "false").strip().lower() == "true"
 
 EFFECTIVE_STRATEGY = {
     "preset": STRATEGY_PRESET,
@@ -115,6 +116,7 @@ EFFECTIVE_STRATEGY = {
         "trailing_stop_pct": TRAILING_STOP_PCT,
     },
     "auto_preset_by_regime": AUTO_PRESET_BY_REGIME,
+    "allow_decision_alerts_outside_market": ALLOW_DECISION_ALERTS_OUTSIDE_MARKET,
 }
 
 # ================= STATE =================
@@ -1635,7 +1637,8 @@ def price_monitor_loop():
                         decision_is_actionable = decision.get("action") in {"AL", "SAT"}
                         cooldown_done = now_ts - float(st.get("last_decision_alert_at", 0.0)) >= DECISION_ALERT_COOLDOWN_SEC
 
-                        if action_changed and decision_is_actionable and cooldown_done:
+                        market_alert_allowed = is_market_open or ALLOW_DECISION_ALERTS_OUTSIDE_MARKET
+                        if action_changed and decision_is_actionable and cooldown_done and market_alert_allowed:
                             st["last_decision_alert_at"] = now_ts
                             send_decision = True
 

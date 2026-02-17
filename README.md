@@ -42,6 +42,7 @@ Required environment variables:
 - `TRAILING_STOP_PCT` (optional, default: `1.2`)
 - `AUTO_PRESET_BY_REGIME` (optional, default: `true`)
 - `DAILY_REPORT_HOUR` (optional, default: `18`)
+- `ALLOW_DECISION_ALERTS_OUTSIDE_MARKET` (optional, default: `false`)
 
 Keep `RUN_MONITOR_IN_WEB=false` in web so only the worker sends alerts.
 
