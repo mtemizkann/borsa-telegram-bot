@@ -32,6 +32,7 @@ Keep `RUN_MONITOR_IN_WEB=false` in web so only the worker sends alerts.
 If `RUN_MONITOR_IN_WEB=true`, bands are automatically recentered around the latest breakout price using `BAND_SIZE_TL`.
 Alerts are rate-limited per symbol with `ALERT_COOLDOWN_SEC`, and alerts are skipped if stop distance is outside `MIN_STOP_DISTANCE_TL` and `MAX_STOP_DISTANCE_TL`.
 Buy-candidate alerts are scored with trend/pullback/breakout/RSI checks and sent only when score is above `BUY_SCORE_THRESHOLD`.
+Market session checks run with Istanbul time (`Europe/Istanbul`), while buy-setup analysis keeps refreshing even when the market is closed.
 
 ## Render deploy
 

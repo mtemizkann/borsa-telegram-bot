@@ -3,6 +3,7 @@ import json
 import time
 import threading
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, Optional, Tuple
 
 import requests
@@ -86,7 +87,7 @@ def safe_round(x: Any, ndigits: int = 2) -> Optional[float]:
         return None
 
 def market_open() -> bool:
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Europe/Istanbul"))
     if now.weekday() >= 5:
         return False
     return 9 <= now.hour < 18
@@ -251,9 +252,7 @@ def send_telegram(message: str) -> None:
 def price_monitor_loop():
     while True:
         try:
-            if not market_open():
-                time.sleep(60)
-                continue
+            is_market_open = market_open()
 
             with _state_lock:
                 snapshot = {k: v.copy() for k, v in WATCHLIST.items()}
@@ -288,7 +287,7 @@ def price_monitor_loop():
 
                     alerted = st.get("alerted")
 
-                    if price <= lower and alerted != "lower":
+                    if is_market_open and price <= lower and alerted != "lower":
                         now_ts = time.time()
                         stop = upper
                         new_lower, new_upper = recenter_band(st, price)
@@ -310,7 +309,7 @@ def price_monitor_loop():
                         )
                         st["last_alert_at"] = now_ts
 
-                    elif price >= upper and alerted != "upper":
+                    elif is_market_open and price >= upper and alerted != "upper":
                         now_ts = time.time()
                         stop = lower
                         new_lower, new_upper = recenter_band(st, price)
@@ -332,7 +331,7 @@ def price_monitor_loop():
                         )
                         st["last_alert_at"] = now_ts
 
-                    elif lower < price < upper:
+                    elif is_market_open and lower < price < upper:
                         st["alerted"] = None
 
                 if should_refresh_analysis:
@@ -367,7 +366,7 @@ def price_monitor_loop():
                             f"Nedenler:\n{reason_text}"
                         )
 
-            time.sleep(30)
+            time.sleep(30 if is_market_open else 60)
 
         except Exception:
             time.sleep(10)
