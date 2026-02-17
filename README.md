@@ -38,6 +38,8 @@ Required environment variables:
 - `DAILY_RISK_CAP_PERCENT` (optional, default: `6`)
 - `MAX_ACTIVE_POSITIONS` (optional, default: `2`)
 - `MAX_POSITIONS_PER_SECTOR` (optional, default: `1`)
+- `PARTIAL_TP1_RATIO` (optional, default: `0.5`)
+- `TRAILING_STOP_PCT` (optional, default: `1.2`)
 
 Keep `RUN_MONITOR_IN_WEB=false` in web so only the worker sends alerts.
 
@@ -57,6 +59,11 @@ Risk Engine v2:
 - New positions are blocked when daily risk budget is exceeded
 - New positions are blocked when max concurrent positions is reached
 - New positions are blocked when sector concentration limit is reached
+
+Exit Management v2:
+- At TP1, position closes partially with `PARTIAL_TP1_RATIO`
+- Remaining lot moves to break-even then trailing stop updates by `TRAILING_STOP_PCT`
+- Position closes fully at TP2 or trailing stop hit
 
 Limitations (free data):
 - No live orderbook/kademe depth (free sources are limited)

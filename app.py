@@ -89,6 +89,8 @@ DECISION_LOG_LIMIT = _env_int("DECISION_LOG_LIMIT", 200)
 DAILY_RISK_CAP_PERCENT = _env_float("DAILY_RISK_CAP_PERCENT", 6.0)
 MAX_ACTIVE_POSITIONS = _env_int("MAX_ACTIVE_POSITIONS", 2)
 MAX_POSITIONS_PER_SECTOR = _env_int("MAX_POSITIONS_PER_SECTOR", 1)
+PARTIAL_TP1_RATIO = _env_float("PARTIAL_TP1_RATIO", 0.5)
+TRAILING_STOP_PCT = _env_float("TRAILING_STOP_PCT", 1.2)
 
 EFFECTIVE_STRATEGY = {
     "preset": STRATEGY_PRESET,
@@ -105,6 +107,10 @@ EFFECTIVE_STRATEGY = {
         "daily_risk_cap_percent": DAILY_RISK_CAP_PERCENT,
         "max_active_positions": MAX_ACTIVE_POSITIONS,
         "max_positions_per_sector": MAX_POSITIONS_PER_SECTOR,
+    },
+    "exit_management": {
+        "partial_tp1_ratio": PARTIAL_TP1_RATIO,
+        "trailing_stop_pct": TRAILING_STOP_PCT,
     },
 }
 
@@ -352,7 +358,7 @@ def apply_risk_controls_locked(symbol: str, decision: Dict[str, Any], now_ts: fl
     action = decision.get("action")
 
     if action == "SAT" and symbol in open_positions:
-        open_positions.pop(symbol, None)
+        close_open_position_locked(symbol, float(decision.get("entry_low") or decision.get("entry_high") or 0.0), "SAT_DECISION", now_ts)
         risk_meta["active_positions"] = len(open_positions)
 
     if action == "AL":
@@ -377,13 +383,25 @@ def apply_risk_controls_locked(symbol: str, decision: Dict[str, Any], now_ts: fl
 
         if risk_meta["allow_new_position"]:
             requested_risk = float(decision.get("risk") or 0.0)
+            entry_price = float(decision.get("entry_high") or decision.get("entry_low") or 0.0)
+            lot_total = int(decision.get("lot") or 0)
             open_positions[symbol] = {
                 "opened_at": now_ts,
                 "sector": sector,
                 "risk": requested_risk,
+                "entry_price": safe_round(entry_price),
                 "entry_low": decision.get("entry_low"),
                 "entry_high": decision.get("entry_high"),
                 "stop": decision.get("stop"),
+                "initial_stop": decision.get("stop"),
+                "trailing_stop": decision.get("stop"),
+                "target1": decision.get("target1"),
+                "target2": decision.get("target2"),
+                "lot_total": lot_total,
+                "lot_open": lot_total,
+                "tp1_done": False,
+                "realized_pnl": 0.0,
+                "last_update": now_ts,
             }
             _risk_state["daily_used_risk"] = float(_risk_state.get("daily_used_risk", 0.0)) + requested_risk
         else:
@@ -402,6 +420,129 @@ def apply_risk_controls_locked(symbol: str, decision: Dict[str, Any], now_ts: fl
     risk_meta["sector_positions"] = _sector_position_count_locked(sector)
     decision["risk_controls"] = risk_meta
     return decision
+
+
+def close_open_position_locked(symbol: str, exit_price: float, reason: str, now_ts: float) -> Optional[Dict[str, Any]]:
+    open_positions = _risk_state.get("open_positions", {})
+    pos = open_positions.get(symbol)
+    if not pos:
+        return None
+
+    entry_price = float(pos.get("entry_price") or 0.0)
+    lot_open = int(pos.get("lot_open") or 0)
+    if entry_price <= 0 or lot_open <= 0:
+        open_positions.pop(symbol, None)
+        return None
+
+    pnl = (exit_price - entry_price) * lot_open
+    pos["realized_pnl"] = float(pos.get("realized_pnl", 0.0)) + pnl
+    event = {
+        "type": "close",
+        "symbol": symbol,
+        "reason": reason,
+        "price": safe_round(exit_price),
+        "qty": lot_open,
+        "pnl": safe_round(pnl),
+        "realized_pnl": safe_round(pos.get("realized_pnl", 0.0)),
+        "ts": now_ts,
+    }
+    open_positions.pop(symbol, None)
+    return event
+
+
+def manage_open_position_locked(symbol: str, price: float, now_ts: float) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    open_positions = _risk_state.get("open_positions", {})
+    pos = open_positions.get(symbol)
+    if not pos:
+        return events
+
+    entry_price = float(pos.get("entry_price") or 0.0)
+    lot_open = int(pos.get("lot_open") or 0)
+    if entry_price <= 0 or lot_open <= 0:
+        open_positions.pop(symbol, None)
+        return events
+
+    trailing_stop = float(pos.get("trailing_stop") or pos.get("stop") or 0.0)
+    if trailing_stop > 0 and price <= trailing_stop:
+        closed = close_open_position_locked(symbol, trailing_stop, "TRAILING_STOP", now_ts)
+        if closed:
+            events.append(closed)
+        return events
+
+    target1 = float(pos.get("target1") or 0.0)
+    target2 = float(pos.get("target2") or 0.0)
+    tp1_done = bool(pos.get("tp1_done"))
+
+    if (not tp1_done) and target1 > 0 and price >= target1:
+        lot_total = int(pos.get("lot_total") or lot_open)
+        close_qty = max(1, int(lot_total * clamp(PARTIAL_TP1_RATIO, 0.1, 0.9)))
+        close_qty = min(close_qty, lot_open)
+        pnl = (price - entry_price) * close_qty
+        pos["lot_open"] = lot_open - close_qty
+        pos["tp1_done"] = True
+        pos["realized_pnl"] = float(pos.get("realized_pnl", 0.0)) + pnl
+        break_even = max(entry_price, trailing_stop)
+        pos["trailing_stop"] = safe_round(break_even)
+        pos["last_update"] = now_ts
+        events.append(
+            {
+                "type": "partial_tp1",
+                "symbol": symbol,
+                "reason": "TP1",
+                "price": safe_round(price),
+                "qty": close_qty,
+                "remaining": pos["lot_open"],
+                "new_trailing_stop": pos.get("trailing_stop"),
+                "pnl": safe_round(pnl),
+                "realized_pnl": safe_round(pos.get("realized_pnl", 0.0)),
+                "ts": now_ts,
+            }
+        )
+
+    if symbol not in open_positions:
+        return events
+    pos = open_positions.get(symbol)
+    lot_open = int(pos.get("lot_open") or 0)
+    if lot_open <= 0:
+        open_positions.pop(symbol, None)
+        return events
+
+    if bool(pos.get("tp1_done")):
+        trailing_candidate = price * (1.0 - (clamp(TRAILING_STOP_PCT, 0.2, 10.0) / 100.0))
+        current_trailing = float(pos.get("trailing_stop") or 0.0)
+        if trailing_candidate > current_trailing:
+            pos["trailing_stop"] = safe_round(trailing_candidate)
+
+    if target2 > 0 and price >= target2:
+        closed = close_open_position_locked(symbol, target2, "TP2", now_ts)
+        if closed:
+            events.append(closed)
+        return events
+
+    pos["last_update"] = now_ts
+    return events
+
+
+def format_position_event_message(event: Dict[str, Any]) -> str:
+    if event.get("type") == "partial_tp1":
+        return (
+            f"🟡 TP1 PARCALI CIKIS\n{event.get('symbol')}\n"
+            f"Fiyat: {event.get('price')}\n"
+            f"Kapanan Lot: {event.get('qty')}\n"
+            f"Kalan Lot: {event.get('remaining')}\n"
+            f"Yeni Trailing Stop: {event.get('new_trailing_stop')}\n"
+            f"Gerceklesen PnL: {event.get('pnl')}"
+        )
+
+    return (
+        f"⚪ POZISYON KAPANDI\n{event.get('symbol')}\n"
+        f"Neden: {event.get('reason')}\n"
+        f"Fiyat: {event.get('price')}\n"
+        f"Kapanan Lot: {event.get('qty')}\n"
+        f"PnL: {event.get('pnl')}\n"
+        f"Toplam Gerceklesen: {event.get('realized_pnl')}"
+    )
 
 
 def evaluate_technical(symbol: str, current_price: float) -> Optional[Dict[str, Any]]:
@@ -1008,11 +1149,15 @@ def price_monitor_loop():
 
                 now_ts = time.time()
                 should_refresh_analysis = False
+                position_events: List[Dict[str, Any]] = []
 
                 with _state_lock:
                     st = WATCHLIST.get(symbol)
                     if not st:
                         continue
+
+                    _ensure_risk_day_locked()
+                    position_events = manage_open_position_locked(symbol, price, now_ts)
 
                     st.setdefault("last_alert_at", 0.0)
                     st.setdefault("last_analysis_at", 0.0)
@@ -1066,6 +1211,9 @@ def price_monitor_loop():
 
                     elif is_market_open and lower < price < upper:
                         st["alerted"] = None
+
+                for ev in position_events:
+                    send_telegram(format_position_event_message(ev))
 
                 if should_refresh_analysis:
                     decision = build_decision(symbol, price)
