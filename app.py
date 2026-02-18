@@ -93,6 +93,8 @@ PARTIAL_TP1_RATIO = _env_float("PARTIAL_TP1_RATIO", 0.5)
 TRAILING_STOP_PCT = _env_float("TRAILING_STOP_PCT", 1.2)
 AUTO_PRESET_BY_REGIME = os.environ.get("AUTO_PRESET_BY_REGIME", "true").strip().lower() == "true"
 DAILY_REPORT_HOUR = _env_int("DAILY_REPORT_HOUR", 18)
+WEEKLY_REPORT_WEEKDAY = _env_int("WEEKLY_REPORT_WEEKDAY", 4)
+WEEKLY_REPORT_HOUR = _env_int("WEEKLY_REPORT_HOUR", 17)
 ALLOW_DECISION_ALERTS_OUTSIDE_MARKET = os.environ.get("ALLOW_DECISION_ALERTS_OUTSIDE_MARKET", "false").strip().lower() == "true"
 STRICT_MARKET_HOURS = os.environ.get("STRICT_MARKET_HOURS", "true").strip().lower() == "true"
 
@@ -119,6 +121,10 @@ EFFECTIVE_STRATEGY = {
     "auto_preset_by_regime": AUTO_PRESET_BY_REGIME,
     "allow_decision_alerts_outside_market": ALLOW_DECISION_ALERTS_OUTSIDE_MARKET,
     "strict_market_hours": STRICT_MARKET_HOURS,
+    "weekly_report": {
+        "weekday": WEEKLY_REPORT_WEEKDAY,
+        "hour": WEEKLY_REPORT_HOUR,
+    },
 }
 
 # ================= STATE =================
@@ -178,6 +184,8 @@ _performance_state: Dict[str, Any] = {
     "losses": 0,
     "decision_counts": {"AL": 0, "BEKLE": 0, "SAT": 0},
     "reports_sent": False,
+    "weekly_reports_sent": [],
+    "daily_archive": [],
     "recent_events": [],
 }
 
@@ -330,6 +338,27 @@ def _ensure_risk_day_locked() -> None:
         _risk_state["open_positions"] = {}
 
     if _performance_state.get("date") != today:
+        prev_date = _performance_state.get("date")
+        if prev_date:
+            prev_closed = int(_performance_state.get("closed_trades", 0))
+            prev_wins = int(_performance_state.get("wins", 0))
+            prev_daily_realized = float(_performance_state.get("daily_realized_pnl", 0.0))
+            prev_expectancy = (prev_daily_realized / prev_closed) if prev_closed > 0 else 0.0
+            archive = _performance_state.setdefault("daily_archive", [])
+            archive.append(
+                {
+                    "date": prev_date,
+                    "daily_realized_pnl": safe_round(prev_daily_realized),
+                    "closed_trades": prev_closed,
+                    "wins": prev_wins,
+                    "losses": int(_performance_state.get("losses", 0)),
+                    "win_rate_pct": safe_round((prev_wins / prev_closed) * 100.0) if prev_closed > 0 else 0.0,
+                    "expectancy": safe_round(prev_expectancy),
+                }
+            )
+            if len(archive) > 40:
+                del archive[: len(archive) - 40]
+
         _performance_state["date"] = today
         _performance_state["daily_realized_pnl"] = 0.0
         _performance_state["closed_trades"] = 0
@@ -339,6 +368,36 @@ def _ensure_risk_day_locked() -> None:
         _performance_state["decision_counts"] = {"AL": 0, "BEKLE": 0, "SAT": 0}
         _performance_state["reports_sent"] = False
         _performance_state["recent_events"] = []
+
+
+def _weekly_snapshot_locked() -> Dict[str, Any]:
+    _ensure_risk_day_locked()
+    today_perf = _performance_snapshot_locked()
+    rows = list(_performance_state.get("daily_archive", [])[-6:])
+    rows.append(
+        {
+            "date": _performance_state.get("date"),
+            "daily_realized_pnl": safe_round(_performance_state.get("daily_realized_pnl", 0.0)),
+            "closed_trades": int(_performance_state.get("closed_trades", 0)),
+            "wins": int(_performance_state.get("wins", 0)),
+            "losses": int(_performance_state.get("losses", 0)),
+            "win_rate_pct": today_perf.get("win_rate_pct"),
+            "expectancy": today_perf.get("expectancy"),
+        }
+    )
+
+    total_pnl = sum(float(r.get("daily_realized_pnl") or 0.0) for r in rows)
+    total_trades = sum(int(r.get("closed_trades") or 0) for r in rows)
+    total_wins = sum(int(r.get("wins") or 0) for r in rows)
+    avg_expectancy = (total_pnl / total_trades) if total_trades > 0 else 0.0
+    win_rate = (total_wins / total_trades) * 100.0 if total_trades > 0 else 0.0
+    return {
+        "days": rows,
+        "weekly_realized_pnl": safe_round(total_pnl),
+        "weekly_trades": total_trades,
+        "weekly_win_rate_pct": safe_round(win_rate),
+        "weekly_expectancy": safe_round(avg_expectancy),
+    }
 
 
 def _get_symbol_sector(symbol: str) -> str:
@@ -970,6 +1029,37 @@ def _maybe_send_daily_report_locked(now_ts: float) -> None:
     )
     send_telegram(msg)
     _performance_state["reports_sent"] = True
+
+
+def _maybe_send_weekly_report_locked(now_ts: float) -> None:
+    _ensure_risk_day_locked()
+    if not TOKEN or not CHAT_ID:
+        return
+
+    now = datetime.fromtimestamp(now_ts, ZoneInfo("Europe/Istanbul"))
+    if now.weekday() != int(clamp(WEEKLY_REPORT_WEEKDAY, 0, 6)):
+        return
+    if now.hour != WEEKLY_REPORT_HOUR:
+        return
+
+    week_key = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
+    sent = _performance_state.setdefault("weekly_reports_sent", [])
+    if week_key in sent:
+        return
+
+    weekly = _weekly_snapshot_locked()
+    msg = (
+        f"📅 HAFTALIK SISTEM OZETI\n"
+        f"Hafta: {week_key}\n"
+        f"Haftalik PnL: {weekly.get('weekly_realized_pnl')}\n"
+        f"Islem Sayisi: {weekly.get('weekly_trades')}\n"
+        f"Win Rate: {weekly.get('weekly_win_rate_pct')}%\n"
+        f"Expectancy: {weekly.get('weekly_expectancy')}"
+    )
+    send_telegram(msg)
+    sent.append(week_key)
+    if len(sent) > 16:
+        del sent[: len(sent) - 16]
 
 
 def run_backtest(symbol: str, days: int, initial_capital: float) -> Dict[str, Any]:
@@ -1653,6 +1743,7 @@ def price_monitor_loop():
 
             with _state_lock:
                 _maybe_send_daily_report_locked(time.time())
+                _maybe_send_weekly_report_locked(time.time())
 
             time.sleep(30 if is_market_open else 60)
 
@@ -1747,6 +1838,7 @@ def api_performance():
     with _state_lock:
         _ensure_risk_day_locked()
         perf = _performance_snapshot_locked()
+        perf["weekly"] = _weekly_snapshot_locked()
         perf["risk_usage"] = {
             "used": safe_round(_risk_state.get("daily_used_risk", 0.0)),
             "budget": safe_round(ACCOUNT_SIZE * (DAILY_RISK_CAP_PERCENT / 100.0)),

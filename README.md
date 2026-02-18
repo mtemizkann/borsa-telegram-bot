@@ -44,6 +44,8 @@ Required environment variables:
 - `DAILY_REPORT_HOUR` (optional, default: `18`)
 - `ALLOW_DECISION_ALERTS_OUTSIDE_MARKET` (optional, default: `false`)
 - `STRICT_MARKET_HOURS` (optional, default: `true`)
+- `WEEKLY_REPORT_WEEKDAY` (optional, default: `4` -> Friday)
+- `WEEKLY_REPORT_HOUR` (optional, default: `17`)
 
 Keep `RUN_MONITOR_IN_WEB=false` in web so only the worker sends alerts.
 
@@ -84,7 +86,7 @@ Limitations (free data):
 - `GET /api/risk-state`
   - Returns daily risk usage, open positions and configured limits
 - `GET /api/performance`
-  - Returns daily realized PnL, expectancy, decision counts and recent events
+  - Returns daily and weekly realized PnL, expectancy, decision counts and recent events
 - `GET /api/calibrate?symbol=TUPRS.IS&days=540&train=180&test=60&capital=100000`
   - Runs walk-forward calibration and returns recommended preset
 
@@ -93,6 +95,9 @@ Backtest note:
 
 Daily summary:
 - Bot sends one daily performance summary to Telegram at `DAILY_REPORT_HOUR` (Istanbul time).
+
+Weekly summary:
+- Bot sends one weekly performance summary at `WEEKLY_REPORT_WEEKDAY` / `WEEKLY_REPORT_HOUR` (Istanbul time).
 
 ## Render deploy
 
