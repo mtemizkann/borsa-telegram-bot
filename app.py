@@ -72,6 +72,13 @@ BAND_SIZE_TL = _env_float("BAND_SIZE_TL", 1)
 MIN_STOP_DISTANCE_TL = _env_float("MIN_STOP_DISTANCE_TL", 0.5)
 MAX_STOP_DISTANCE_TL = _env_float("MAX_STOP_DISTANCE_TL", 20)
 ALERT_COOLDOWN_SEC = _env_int("ALERT_COOLDOWN_SEC", 180)
+ENABLE_BAND_ALERTS = os.environ.get("ENABLE_BAND_ALERTS", "true").strip().lower() == "true"
+ENABLE_POSITION_EVENT_ALERTS = os.environ.get("ENABLE_POSITION_EVENT_ALERTS", "true").strip().lower() == "true"
+DECISION_NOTIFY_ACTIONS = {
+    x.strip().upper()
+    for x in os.environ.get("DECISION_NOTIFY_ACTIONS", "AL").split(",")
+    if x.strip()
+}
 
 ANALYSIS_REFRESH_SEC = _env_int("ANALYSIS_REFRESH_SEC", 300)
 DECISION_ALERT_COOLDOWN_SEC = _env_int("DECISION_ALERT_COOLDOWN_SEC", int(_preset["DECISION_ALERT_COOLDOWN_SEC"]))
@@ -121,6 +128,9 @@ EFFECTIVE_STRATEGY = {
     "auto_preset_by_regime": AUTO_PRESET_BY_REGIME,
     "allow_decision_alerts_outside_market": ALLOW_DECISION_ALERTS_OUTSIDE_MARKET,
     "strict_market_hours": STRICT_MARKET_HOURS,
+    "enable_band_alerts": ENABLE_BAND_ALERTS,
+    "enable_position_event_alerts": ENABLE_POSITION_EVENT_ALERTS,
+    "decision_notify_actions": sorted(list(DECISION_NOTIFY_ACTIONS)),
     "weekly_report": {
         "weekday": WEEKLY_REPORT_WEEKDAY,
         "hour": WEEKLY_REPORT_HOUR,
@@ -1667,7 +1677,7 @@ def price_monitor_loop():
                         new_lower, new_upper = recenter_band(st, price)
                         st["alerted"] = "lower"
 
-                        if now_ts - float(st.get("last_alert_at", 0.0)) >= ALERT_COOLDOWN_SEC and stop_distance_allowed(price, stop):
+                        if ENABLE_BAND_ALERTS and now_ts - float(st.get("last_alert_at", 0.0)) >= ALERT_COOLDOWN_SEC and stop_distance_allowed(price, stop):
                             lot, total_risk = calculate_position(price, stop)
                             send_telegram(
                                 f"🟢 AL\n{symbol}\n"
@@ -1684,7 +1694,7 @@ def price_monitor_loop():
                         new_lower, new_upper = recenter_band(st, price)
                         st["alerted"] = "upper"
 
-                        if now_ts - float(st.get("last_alert_at", 0.0)) >= ALERT_COOLDOWN_SEC and stop_distance_allowed(price, stop):
+                        if ENABLE_BAND_ALERTS and now_ts - float(st.get("last_alert_at", 0.0)) >= ALERT_COOLDOWN_SEC and stop_distance_allowed(price, stop):
                             lot, total_risk = calculate_position(price, stop)
                             send_telegram(
                                 f"🔴 SAT\n{symbol}\n"
@@ -1702,7 +1712,8 @@ def price_monitor_loop():
                 for ev in position_events:
                     with _state_lock:
                         _register_position_event_locked(ev)
-                    send_telegram(format_position_event_message(ev))
+                    if ENABLE_POSITION_EVENT_ALERTS:
+                        send_telegram(format_position_event_message(ev))
 
                 if should_refresh_analysis:
                     decision = build_decision(symbol, price)
@@ -1728,7 +1739,7 @@ def price_monitor_loop():
                         _register_decision_locked(str(decision.get("action") or "BEKLE"))
 
                         action_changed = decision.get("action") != prev_action
-                        decision_is_actionable = decision.get("action") in {"AL", "SAT"}
+                        decision_is_actionable = str(decision.get("action") or "").upper() in DECISION_NOTIFY_ACTIONS
                         cooldown_done = now_ts - float(st.get("last_decision_alert_at", 0.0)) >= DECISION_ALERT_COOLDOWN_SEC
 
                         market_alert_allowed = is_market_open or ALLOW_DECISION_ALERTS_OUTSIDE_MARKET

@@ -23,6 +23,9 @@ Required environment variables:
 - `MIN_STOP_DISTANCE_TL` (optional, default: `0.5`)
 - `MAX_STOP_DISTANCE_TL` (optional, default: `20`)
 - `ALERT_COOLDOWN_SEC` (optional, default: `180`)
+- `ENABLE_BAND_ALERTS` (optional, default: `true`)
+- `ENABLE_POSITION_EVENT_ALERTS` (optional, default: `true`)
+- `DECISION_NOTIFY_ACTIONS` (optional, default: `AL`, e.g. `AL,SAT`)
 - `ANALYSIS_REFRESH_SEC` (optional, default: `300`)
 - `STRATEGY_PRESET` (optional, `AGRESIF` / `DENGELI` / `KORUMACI`, default: `DENGELI`)
 - `DECISION_ALERT_COOLDOWN_SEC` (optional, default: `3600`)
@@ -51,6 +54,7 @@ Keep `RUN_MONITOR_IN_WEB=false` in web so only the worker sends alerts.
 
 If `RUN_MONITOR_IN_WEB=true`, bands are automatically recentered around the latest breakout price using `BAND_SIZE_TL`.
 Alerts are rate-limited per symbol with `ALERT_COOLDOWN_SEC`, and alerts are skipped if stop distance is outside `MIN_STOP_DISTANCE_TL` and `MAX_STOP_DISTANCE_TL`.
+If you want fewer notifications for swing usage, set `ENABLE_BAND_ALERTS=false` and keep `DECISION_NOTIFY_ACTIONS=AL`.
 Decision Engine v3 uses weighted factors (technical + fundamental + news + market regime) and outputs `AL / BEKLE / SAT` with entry, stop, target, risk and confidence score.
 Market session checks run with Istanbul time (`Europe/Istanbul`).
 When `STRICT_MARKET_HOURS=true`, monitor logic and Telegram alerts run only during market hours.
