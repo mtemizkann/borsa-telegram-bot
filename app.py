@@ -164,6 +164,12 @@ WATCHLIST: Dict[str, Dict[str, Any]] = {
     },
 }
 
+SECTOR_HINTS: Dict[str, str] = {
+    "ASELS.IS": "INDUSTRIALS",
+    "TUPRS.IS": "ENERGY",
+    "FROTO.IS": "CONSUMER CYCLICAL",
+}
+
 _TICKERS: Dict[str, yf.Ticker] = {}
 _state_lock = threading.Lock()
 _monitor_started = False
@@ -405,15 +411,7 @@ def _get_symbol_sector(symbol: str) -> str:
     if cached:
         return cached
 
-    sector = "UNKNOWN"
-    try:
-        info = get_ticker(symbol).info or {}
-        sector = (info.get("sector") or info.get("industry") or "UNKNOWN").strip().upper()
-    except Exception:
-        sector = "UNKNOWN"
-
-    if not sector:
-        sector = "UNKNOWN"
+    sector = (SECTOR_HINTS.get(symbol) or "UNKNOWN").strip().upper()
     _symbol_sector_cache[symbol] = sector
     return sector
 
@@ -1762,10 +1760,8 @@ def ensure_monitor_started():
         _monitor_started = True
 
 
-@app.before_request
-def start_monitor_once():
-    if RUN_MONITOR_IN_WEB:
-        ensure_monitor_started()
+if RUN_MONITOR_IN_WEB:
+    ensure_monitor_started()
 
 
 # ================= API =================
